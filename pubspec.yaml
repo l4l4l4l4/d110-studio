@@ -1,0 +1,132 @@
+name: d110_studio
+description: Local-first label editor for the AiYin-protocol D110.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.11.0 <4.0.0'
+
+dependencies:
+  cupertino_icons: ^1.0.9
+  flutter:
+    sdk: flutter
+  qr: 3.0.2
+  web: 1.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/sources.json
+    - assets/fonts/NotoSans/OFL.txt
+    - assets/fonts/NotoSerif/OFL.txt
+    - assets/fonts/JetBrainsMono/OFL.txt
+    - assets/fonts/UnifrakturMaguntia/OFL.txt
+    - assets/fonts/ShantellSans/OFL.txt
+    - assets/fonts/PressStart2P/OFL.txt
+    - assets/fonts/RubikGlitch/OFL.txt
+    - assets/fonts/RubikIso/OFL.txt
+    - assets/fonts/RubikMonoOne/OFL.txt
+    - assets/fonts/Bungee/OFL.txt
+    - assets/fonts/NotoSansArabic/OFL.txt
+    - assets/fonts/NotoSansHebrew/OFL.txt
+    - assets/fonts/NotoSansDevanagari/OFL.txt
+    - assets/fonts/NotoSansThai/OFL.txt
+    - assets/fonts/NotoSansCJK/OFL.txt
+  fonts:
+    - family: NotoSans
+      fonts:
+        - asset: assets/fonts/NotoSans/NotoSans-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/NotoSans/NotoSans-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/NotoSans/NotoSans-Italic.ttf
+          weight: 400
+          style: italic
+        - asset: assets/fonts/NotoSans/NotoSans-BoldItalic.ttf
+          weight: 700
+          style: italic
+    - family: NotoSerif
+      fonts:
+        - asset: assets/fonts/NotoSerif/NotoSerif-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/NotoSerif/NotoSerif-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/NotoSerif/NotoSerif-Italic.ttf
+          weight: 400
+          style: italic
+        - asset: assets/fonts/NotoSerif/NotoSerif-BoldItalic.ttf
+          weight: 700
+          style: italic
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/JetBrainsMono/JetBrainsMono-Italic.ttf
+          weight: 400
+          style: italic
+        - asset: assets/fonts/JetBrainsMono/JetBrainsMono-BoldItalic.ttf
+          weight: 700
+          style: italic
+    - family: UnifrakturMaguntia
+      fonts:
+        - asset: assets/fonts/UnifrakturMaguntia/UnifrakturMaguntia-Book.ttf
+          weight: 400
+    - family: ShantellSans
+      fonts:
+        - asset: assets/fonts/ShantellSans/Shantell_Sans-Normal-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/ShantellSans/Shantell_Sans-Normal-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/ShantellSans/Shantell_Sans-Normal-Regular_Italic.ttf
+          weight: 400
+          style: italic
+        - asset: assets/fonts/ShantellSans/Shantell_Sans-Normal-Bold_Italic.ttf
+          weight: 700
+          style: italic
+    - family: PressStart2P
+      fonts:
+        - asset: assets/fonts/PressStart2P/PressStart2P-Regular.ttf
+          weight: 400
+    - family: RubikGlitch
+      fonts:
+        - asset: assets/fonts/RubikGlitch/RubikGlitch-Regular.ttf
+          weight: 400
+    - family: RubikIso
+      fonts:
+        - asset: assets/fonts/RubikIso/RubikIso-Regular.ttf
+          weight: 400
+    - family: RubikMonoOne
+      fonts:
+        - asset: assets/fonts/RubikMonoOne/RubikMonoOne-Regular.ttf
+          weight: 400
+    - family: Bungee
+      fonts:
+        - asset: assets/fonts/Bungee/Bungee-Regular.ttf
+          weight: 400
+    - family: NotoSansArabic
+      fonts:
+        - asset: assets/fonts/NotoSansArabic/NotoSansArabic-Regular.ttf
+          weight: 400
+    - family: NotoSansHebrew
+      fonts:
+        - asset: assets/fonts/NotoSansHebrew/NotoSansHebrew-Regular.ttf
+          weight: 400
+    - family: NotoSansDevanagari
+      fonts:
+        - asset: assets/fonts/NotoSansDevanagari/NotoSansDevanagari-Regular.ttf
+          weight: 400
+    - family: NotoSansThai
+      fonts:
+        - asset: assets/fonts/NotoSansThai/NotoSansThai-Regular.ttf
+          weight: 400
+    - family: NotoSansCJK
+      fonts:
+        - asset: assets/fonts/NotoSansCJK/NotoSansCJKkr-Regular.otf
+          weight: 400
