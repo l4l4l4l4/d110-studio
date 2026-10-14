@@ -133,6 +133,12 @@ class _StudioPageState extends State<StudioPage>
       startTextScaleY = 1;
   _DragHandle? activeHandle, pointerHandle;
   Offset? pointerDown;
+  double viewZoom = 1;
+  Offset viewPan = Offset.zero;
+  bool zoomingLabel = false;
+  double startZoom = 1;
+  Offset startPan = Offset.zero;
+  Offset? zoomFocal;
   late final AnimationController ants = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 650),
@@ -640,21 +646,22 @@ class _StudioPageState extends State<StudioPage>
         document.width.toDouble(),
         LabelDocument.height.toDouble(),
       );
-      final caption = portrait ? 36.0 : 0.0;
-      final scale = math
+      final fit = math
           .min(
             (constraints.maxWidth - 48) / side,
-            (constraints.maxHeight - 48 - caption) / side,
+            (constraints.maxHeight - 48) / side,
           )
           .clamp(.05, 12.0);
+      final scale = fit * viewZoom;
       final inset = Offset(
         24 + (side - document.width) * scale / 2,
         24 + (side - LabelDocument.height) * scale / 2,
       );
       Offset labelPoint(Offset local) => (local - inset) / scale;
-      return Column(
-        children: [
-          Center(
+      return ClipRect(
+        child: Center(
+          child: Transform.translate(
+            offset: viewPan,
             child: RotatedBox(
               quarterTurns: portrait ? 1 : 0,
               child: SizedBox.square(
@@ -687,6 +694,13 @@ class _StudioPageState extends State<StudioPage>
                     onScaleStart: preview || busy
                         ? null
                         : (details) {
+                            if (details.pointerCount >= 2) {
+                              zoomingLabel = true;
+                              startZoom = viewZoom;
+                              startPan = viewPan;
+                              zoomFocal = details.localFocalPoint;
+                              return;
+                            }
                             final point =
                                 details.pointerCount == 1 && pointerDown != null
                                 ? pointerDown!
@@ -717,6 +731,19 @@ class _StudioPageState extends State<StudioPage>
                     onScaleUpdate: preview || busy
                         ? null
                         : (details) {
+                            if (zoomingLabel) {
+                              final focal = zoomFocal;
+                              if (focal == null) return;
+                              setState(() {
+                                viewZoom = (startZoom * details.scale).clamp(
+                                  .4,
+                                  6,
+                                );
+                                viewPan =
+                                    startPan + details.localFocalPoint - focal;
+                              });
+                              return;
+                            }
                             final element = selected, origin = dragPoint;
                             if (element == null || origin == null) return;
                             final current = labelPoint(details.localFocalPoint);
@@ -776,7 +803,10 @@ class _StudioPageState extends State<StudioPage>
                             element.rotation = startAngle + details.rotation;
                             changed();
                           },
-                    onScaleEnd: (_) => activeHandle = pointerHandle = null,
+                    onScaleEnd: (_) {
+                      zoomingLabel = false;
+                      activeHandle = pointerHandle = null;
+                    },
                     child: Padding(
                       padding: EdgeInsets.fromLTRB(inset.dx, inset.dy, 24, 24),
                       child: Stack(
@@ -814,16 +844,7 @@ class _StudioPageState extends State<StudioPage>
               ),
             ),
           ),
-          if (portrait)
-            const Padding(
-              padding: EdgeInsets.only(bottom: 4),
-              child: Text(
-                'Вид +90° · углы объектов относительно макета',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: StudioColors.muted, fontSize: 11),
-              ),
-            ),
-        ],
+        ),
       );
     },
   );
@@ -946,48 +967,7 @@ class _StudioPageState extends State<StudioPage>
                       ],
                     ),
                   ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.sticky_note_2_outlined,
-                        size: 16,
-                        color: StudioColors.muted,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${document.lengthMm} × 12 мм',
-                        style: const TextStyle(color: StudioColors.muted),
-                      ),
-                      const Spacer(),
-                      Text(
-                        preview ? 'Пиксели печати' : 'Белое — бумага',
-                        style: const TextStyle(
-                          color: StudioColors.muted,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
                 Expanded(child: canvas()),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-                  child: Text(
-                    preview
-                        ? 'Точные ч/б-пиксели · предпросмотр без рамки'
-                        : 'Перетащите · два пальца: масштаб и поворот',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: StudioColors.muted,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
                 Container(
                   decoration: const BoxDecoration(
                     color: StudioColors.surface,
