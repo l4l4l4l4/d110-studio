@@ -140,4 +140,36 @@ void main() {
     expect(element.height, height);
     await tester.pumpWidget(const SizedBox());
   });
+
+  testWidgets('two fingers zoom the label without resizing the object', (
+    tester,
+  ) async {
+    final painter = await openEditor(tester, const Size(420, 900));
+    final element = painter.document.elements.first;
+    final width = element.width;
+    final box = tester.renderObject<RenderBox>(gestureSurface());
+    final center = box.localToGlobal(box.size.center(Offset.zero));
+    final left = await tester.startGesture(
+      center - const Offset(24, 0),
+      kind: ui.PointerDeviceKind.touch,
+    );
+    final right = await tester.startGesture(
+      center + const Offset(24, 0),
+      kind: ui.PointerDeviceKind.touch,
+    );
+    await left.moveTo(center - const Offset(90, 0));
+    await right.moveTo(center + const Offset(90, 0));
+    await left.up();
+    await right.up();
+    await tester.pump();
+    final zoomed =
+        tester.widget<CustomPaint>(labelPaint()).painter! as LabelPainter;
+    expect(zoomed.scale, greaterThan(painter.scale * 1.4));
+    expect(element.width, width);
+    expect(find.textContaining('Перетащите'), findsNothing);
+    expect(find.textContaining('Белое'), findsNothing);
+    expect(find.textContaining('Вид +90'), findsNothing);
+    expect(find.text('Печатать'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
 }
