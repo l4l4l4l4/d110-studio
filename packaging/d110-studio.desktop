@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=D110 Studio
+Comment=Bluetooth label editor for AiYin-protocol D110 printers
+Exec=d110_studio
+Icon=d110-studio
+Categories=Utility;Graphics;
+Terminal=false
+StartupWMClass=ing.lalala.d110_studio

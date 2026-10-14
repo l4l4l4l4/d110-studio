@@ -1,15 +1,13 @@
 # D110 Studio
 
-Local-first Flutter label editor for the ORICO-branded D110 tested with firmware V1.0.4. This revision speaks AiYin/Fichero raster commands, not the NIIMBOT protocol.
+Dark Gruvbox Flutter label editor: text, transparent QR codes and images; drag, rotate and scale; box reflow or per-axis glyph stretching; 10 bundled open fonts; threshold, Bayer/Floyd–Steinberg dithering and Sobel edges. Bluetooth printing, local templates, no accounts or telemetry.
 
-## Scope
+**Printers:** ORICO D110 / Temu-style D110 label printers using the **AiYin/Fichero protocol**. Tested revision: D110, firmware **V1.0.4**, USB **09c5:0200**, 96-dot printhead. Other revisions are unverified; **NIIMBOT-protocol D110 is not supported**.
 
-Android Bluetooth printing; text, QR codes and images; element positioning and rotation; monochrome preview, thresholding, dithering and edge detection. No accounts, network services or firmware modifications.
+**Downloads:** [Linux AppImage, Android APK, Windows EXE](https://github.com/l4l4l4l4/d110-studio/releases/latest). Windows installer is unsigned.
 
-## Device evidence
+**Use:** connect the classic Bluetooth D110 (not `_BLE`), choose your roll's label length, compose and print. Printable width is 12 mm; heat level 3 is maximum. For 30 mm labels with 8 mm gaps, use 30 mm: gap mode positions the next label automatically, without adding the gap to the image. Leave the QR's 4-module quiet zone clear. Templates are stored on the host, not inside the printer; firmware is not modified.
 
-The tested device identifies as D110, Bluetooth name D110_B818, USB 09c5:0200. Printing with a 96-dot head and density 2 was physically confirmed over USB. Classic Bluetooth RFCOMM channel 1 answered the same read-only protocol queries. Android printing must be separately verified on the phone.
+**Build:** Flutter 3.41.9; `make check`, `make run`, `make apk`, `make appimage`, `make windows`. Nix: `nix develop`. Android requires JDK 17 and private `android/key.properties` for release signing; CI uses the `ANDROID_SIGNING` secret.
 
-Protocol reference: https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md
-
-Hardware identity, flash readout and onboard sound hardware remain unconfirmed. Do not send firmware update, erase or factory-reset commands.
+[MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)
