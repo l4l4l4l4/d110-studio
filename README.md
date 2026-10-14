@@ -8,6 +8,6 @@ Dark Gruvbox Flutter label editor: text, transparent QR codes and images; drag, 
 
 **Use:** connect the classic Bluetooth D110 (not `_BLE`), choose your roll's label length, compose and print. Printable width is 12 mm; heat level 3 is maximum. For 30 mm labels with 8 mm gaps, use 30 mm: gap mode positions the next label automatically, without adding the gap to the image. Leave the QR's 4-module quiet zone clear. Templates are stored on the host, not inside the printer; firmware is not modified.
 
-**Build:** Flutter 3.41.9; `make check`, `make run`, `make apk`, `make appimage`, `make windows`. Nix: `nix develop`. Android release signing requires private `android/key.properties`; CI uses the `ANDROID_SIGNING` secret.
+**Build:** Flutter 3.41.9; `make check`, `make run`, `make apk`, `make appimage`, `make windows`. Nix: `nix develop`. Android requires JDK 17 and private `android/key.properties` for release signing; CI uses the `ANDROID_SIGNING` secret.
 
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)
