@@ -131,7 +131,8 @@ class _StudioPageState extends State<StudioPage>
       startFont = 0,
       startTextScaleX = 1,
       startTextScaleY = 1;
-  _DragHandle? activeHandle;
+  _DragHandle? activeHandle, pointerHandle;
+  Offset? pointerDown;
   late final AnimationController ants = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 650),
@@ -635,40 +636,47 @@ class _StudioPageState extends State<StudioPage>
       final portrait =
           constraints.maxWidth < 600 &&
           constraints.maxHeight > constraints.maxWidth * .9;
+      final side = math.max(
+        document.width.toDouble(),
+        LabelDocument.height.toDouble(),
+      );
+      final caption = portrait ? 36.0 : 0.0;
       final scale = math
           .min(
-            (constraints.maxWidth - 40) /
-                (portrait ? LabelDocument.height : document.width),
-            (constraints.maxHeight - 48) /
-                (portrait ? document.width : LabelDocument.height),
+            (constraints.maxWidth - 48) / side,
+            (constraints.maxHeight - 48 - caption) / side,
           )
           .clamp(.05, 12.0);
+      final inset = Offset(
+        24 + (side - document.width) * scale / 2,
+        24 + (side - LabelDocument.height) * scale / 2,
+      );
+      Offset labelPoint(Offset local) => (local - inset) / scale;
       return Column(
         children: [
-          Expanded(
-            child: Center(
-              child: RotatedBox(
-                quarterTurns: portrait ? 1 : 0,
-                child: SizedBox(
-                  width: document.width * scale,
-                  height: LabelDocument.height * scale,
+          Center(
+            child: RotatedBox(
+              quarterTurns: portrait ? 1 : 0,
+              child: SizedBox.square(
+                dimension: side * scale + 48,
+                child: Listener(
+                  key: const ValueKey('label-gesture'),
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: preview || busy
+                      ? null
+                      : (event) {
+                          final point = labelPoint(event.localPosition);
+                          pointerHandle = hitHandle(point, scale);
+                          pointerDown = pointerHandle != null ? point : null;
+                        },
+                  onPointerUp: (_) => pointerDown = null,
+                  onPointerCancel: (_) => pointerDown = null,
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onDoubleTap: preview || busy ? null : editSelected,
-                    onDoubleTapDown: preview || busy
-                        ? null
-                        : (details) {
-                            final point = details.localPosition / scale;
-                            setState(
-                              () => selected = document.elements.reversed
-                                  .where((element) => element.contains(point))
-                                  .firstOrNull,
-                            );
-                          },
                     onTapUp: preview || busy
                         ? null
                         : (details) {
-                            final point = details.localPosition / scale;
+                            final point = labelPoint(details.localPosition);
                             if (hitHandle(point, scale) != null) return;
                             setState(
                               () => selected = document.elements.reversed
@@ -679,9 +687,12 @@ class _StudioPageState extends State<StudioPage>
                     onScaleStart: preview || busy
                         ? null
                         : (details) {
-                            final point = details.localFocalPoint / scale;
+                            final point =
+                                details.pointerCount == 1 && pointerDown != null
+                                ? pointerDown!
+                                : labelPoint(details.localFocalPoint);
                             activeHandle = details.pointerCount == 1
-                                ? hitHandle(point, scale)
+                                ? pointerHandle
                                 : null;
                             if (activeHandle == null &&
                                 (details.pointerCount < 2 ||
@@ -708,8 +719,8 @@ class _StudioPageState extends State<StudioPage>
                         : (details) {
                             final element = selected, origin = dragPoint;
                             if (element == null || origin == null) return;
-                            final delta =
-                                details.localFocalPoint / scale - origin;
+                            final current = labelPoint(details.localFocalPoint);
+                            final delta = current - origin;
                             element.width = startWidth;
                             element.height = startHeight;
                             element.fontSize = startFont;
@@ -723,8 +734,7 @@ class _StudioPageState extends State<StudioPage>
                                 startY + startHeight / 2,
                               );
                               final before = origin - center;
-                              final after =
-                                  details.localFocalPoint / scale - center;
+                              final after = current - center;
                               if (activeHandle == _DragHandle.rotate) {
                                 element.rotation =
                                     startAngle +
@@ -766,35 +776,38 @@ class _StudioPageState extends State<StudioPage>
                             element.rotation = startAngle + details.rotation;
                             changed();
                           },
-                    onScaleEnd: (_) => activeHandle = null,
-                    child: Stack(
-                      clipBehavior: Clip.none,
-                      fit: StackFit.expand,
-                      children: [
-                        RepaintBoundary(
-                          child: CustomPaint(
-                            painter: LabelPainter(
-                              document,
-                              scale,
-                              preview ? previewImage : null,
-                              revision,
-                            ),
-                          ),
-                        ),
-                        if (!preview && selected != null)
-                          IgnorePointer(
-                            child: RepaintBoundary(
-                              child: CustomPaint(
-                                painter: SelectionPainter(
-                                  selected!,
-                                  scale,
-                                  ants,
-                                  revision,
-                                ),
+                    onScaleEnd: (_) => activeHandle = pointerHandle = null,
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(inset.dx, inset.dy, 24, 24),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        fit: StackFit.expand,
+                        children: [
+                          RepaintBoundary(
+                            child: CustomPaint(
+                              painter: LabelPainter(
+                                document,
+                                scale,
+                                preview ? previewImage : null,
+                                revision,
                               ),
                             ),
                           ),
-                      ],
+                          if (!preview && selected != null)
+                            IgnorePointer(
+                              child: RepaintBoundary(
+                                child: CustomPaint(
+                                  painter: SelectionPainter(
+                                    selected!,
+                                    scale,
+                                    ants,
+                                    revision,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
