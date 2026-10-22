@@ -10,4 +10,6 @@ Dark Gruvbox Flutter label editor: text, transparent QR codes and images; drag, 
 
 **Build:** Flutter 3.41.9; `make check`, `make run`, `make apk`, `make appimage`, `make windows`. Nix: `nix develop`. Android requires JDK 17 and private `android/key.properties` for release signing; CI uses the `ANDROID_SIGNING` secret.
 
+`make check` covers text/QR payload preservation and text-dialog save, cancel and outside-click dismissal, alongside touch gestures and raster output. Text-entry fields own their controllers until the dialog route is unmounted; completing `showDialog` does not end the outgoing route's lifetime.
+
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)

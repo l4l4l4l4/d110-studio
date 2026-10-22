@@ -234,17 +234,18 @@ class _StudioPageState extends State<StudioPage>
     }
   }
 
-  Future<String?> askText(String title, String initial) async {
-    final controller = TextEditingController(text: initial);
-    final result = await showDialog<String>(
+  Future<String?> askText(String title, String initial) {
+    var value = initial;
+    return showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),
-        content: TextField(
-          controller: controller,
+        content: TextFormField(
+          initialValue: initial,
           autofocus: true,
           maxLines: 3,
-          onSubmitted: (value) => Navigator.pop(context, value),
+          onChanged: (text) => value = text,
+          onFieldSubmitted: (text) => Navigator.pop(context, text),
         ),
         actions: [
           TextButton(
@@ -252,14 +253,12 @@ class _StudioPageState extends State<StudioPage>
             child: const Text('Отмена'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
+            onPressed: () => Navigator.pop(context, value),
             child: const Text('Сохранить'),
           ),
         ],
       ),
     );
-    controller.dispose();
-    return result;
   }
 
   Future<void> add(ElementKind kind) => action(() async {
