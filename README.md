@@ -25,4 +25,12 @@ switch between the original color source and the actual monochrome print
 result; only the latter is printed. Inspector controls scroll independently
 of the canvas.
 
+`Стек` splits one full-size design into a 1–8 by 1–8 sticker grid without
+rescaling its dots. Canvas seams show the exact crop boundaries. Templates
+save the grid as version 2 and still load version 1 as a single sticker.
+Printing proceeds left-to-right, then top-to-bottom: after each printer
+acknowledgement, an animated placement guide shows the emitted sticker and
+waits for `Наклеено — дальше`. Cancellation settles an in-flight sticker;
+an ambiguous failure stops the job without retrying or replaying it.
+
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)
