@@ -7,6 +7,8 @@ environment:
   sdk: '>=3.11.0 <4.0.0'
 
 dependencies:
+  crypto: 3.0.7
+  http: 1.6.0
   cupertino_icons: ^1.0.9
   flutter:
     sdk: flutter
