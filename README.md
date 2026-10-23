@@ -23,6 +23,16 @@ switch between the original color source and the actual monochrome print
 result; only the latter is printed. Inspector controls scroll independently
 of the canvas.
 
+Named design tabs keep independent artwork, selection, inspector, zoom, pan
+and source/print preview states. The active tab and its close button scroll
+into view; closing a changed draft requires confirmation. Creating or switching
+tabs does not send anything to the printer.
+
+Drafts persist locally and survive reopening. Startup selects the exact last
+acknowledged print while retaining newer edits in their own tabs. A damaged
+print-history record warns without discarding or blocking valid drafts;
+unreadable draft storage is not silently overwritten.
+
 `Стек` splits one full-size design into a 1–8 by 1–8 sticker grid without
 rescaling its dots. Canvas seams show the exact crop boundaries. Templates
 save the grid as version 2 and still load version 1 as a single sticker.
