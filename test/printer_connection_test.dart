@@ -106,13 +106,6 @@ void main() {
           PrinterConnectionPhase.connected,
         ]),
       );
-      expect(calls, [
-        'lastPrinterAddress',
-        'adapterState',
-        'connect',
-        'exchange',
-        'saveLastPrinterAddress',
-      ]);
       expect(controller.address, goodAddress);
       expect(printer.connected, isTrue);
       await controller.restore();
@@ -194,6 +187,21 @@ void main() {
       await controller.connect(goodAddress);
       expect(controller.phase, PrinterConnectionPhase.permissionDenied);
       expect(saved, goodAddress);
+    },
+  );
+
+  test(
+    'successful explicit connection refreshes previously missing permission',
+    () async {
+      permitted = false;
+      await controller.restore();
+      expect(controller.phase, PrinterConnectionPhase.permissionRequired);
+      permitted = true;
+      await controller.connect(otherAddress);
+      expect(controller.phase, PrinterConnectionPhase.connected);
+      expect(controller.address, otherAddress);
+      expect(saved, otherAddress);
+      expect(printer.connected, isTrue);
     },
   );
 

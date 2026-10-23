@@ -51,6 +51,17 @@ the picker. Declining leaves the editor usable without an error-only dialog.
 Missing adapters, denied permissions, cancelled requests and discovery errors
 have distinct recovery states.
 
+Android, Linux/BlueZ and Windows monitor adapter changes without polling.
+Known power loss updates the foreground connection state without waiting for
+resume. Power restoration schedules one saved-printer reconnect after active
+I/O settles; interrupted prints are never replayed. Late discovery or handshake
+replies cannot override a newer power-loss event.
+
+An inspection failure reports unknown power, not a false Bluetooth-off state,
+and preserves a potentially healthy transport. Explicit permission refusal
+remains distinct from a missing grant. A successful explicit connection
+refreshes permission/power state before showing connected guidance.
+
 The picker excludes BLE-only twins, unrelated device names and devices known
 not to expose classic Serial Port Profile. An unverified classic D110 with
 unknown cached service metadata remains a candidate until the protocol
