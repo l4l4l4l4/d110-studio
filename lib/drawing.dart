@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'media_geometry.dart';
 
 /// Opens a drawing sheet measured in printer dots, not screen pixels.
 ///
@@ -16,12 +17,21 @@ Future<Uint8List?> showDrawingEditor(
   BuildContext context, {
   required int width,
   required int height,
+  MediaProfile? media,
+  int rows = 1,
+  int columns = 1,
 }) {
   _validateDimensions(width, height);
   return showDialog<Uint8List>(
     context: context,
     barrierDismissible: false,
-    builder: (context) => _DrawingEditor(width: width, height: height),
+    builder: (context) => _DrawingEditor(
+      width: width,
+      height: height,
+      media: media,
+      rows: rows,
+      columns: columns,
+    ),
   );
 }
 
@@ -30,7 +40,7 @@ void _validateDimensions(int width, int height) {
       height < 1 ||
       width > 9600 ||
       height > 9600 ||
-      width * height > 16000000) {
+      width * height > maxMediaCanvasPixels) {
     throw ArgumentError('Drawing dimensions must fit within 9600 dots / 16 MP');
   }
 }
@@ -71,8 +81,22 @@ class DrawingDocument extends ChangeNotifier {
     required this.height,
     this.maxPoints = 60000,
     this.maxStrokes = 512,
+    this.media,
+    this.rows = 1,
+    this.columns = 1,
   }) {
     _validateDimensions(width, height);
+    if (rows < 1 ||
+        rows > 8 ||
+        columns < 1 ||
+        columns > 8 ||
+        (media != null &&
+            (width != media!.rasterRows * columns ||
+                height != media!.paperHeightDots * rows))) {
+      throw ArgumentError(
+        'Размер рисунка должен соответствовать физической сетке ленты',
+      );
+    }
     if (maxPoints < 1 || maxStrokes < 1) {
       throw ArgumentError('Drawing limits must be positive');
     }
@@ -80,6 +104,40 @@ class DrawingDocument extends ChangeNotifier {
   }
 
   final int width, height, maxPoints, maxStrokes;
+  final MediaProfile? media;
+  final int rows, columns;
+
+  Path _gridPath({required bool printable}) {
+    if (media == null) {
+      return Path()
+        ..addRect(Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()));
+    }
+    final path = Path();
+    final tile = printable ? media!.printablePath : media!.paperPath;
+    for (var row = 0; row < rows; row++) {
+      for (var column = 0; column < columns; column++) {
+        path.addPath(
+          tile,
+          Offset(
+            (column * media!.rasterRows).toDouble(),
+            (row * media!.paperHeightDots).toDouble(),
+          ),
+        );
+      }
+    }
+    return path;
+  }
+
+  /// Only the presentation is clipped. [exportPng] retains all source ink so
+  /// changing the physical profile can reveal it without reconstructing strokes.
+  void paintPreview(Canvas canvas) {
+    canvas.drawPath(_gridPath(printable: false), Paint()..color = Colors.white);
+    canvas.save();
+    canvas.clipPath(_gridPath(printable: true), doAntiAlias: false);
+    _paint(canvas);
+    canvas.restore();
+  }
+
   final List<DrawingStroke> _strokes = [];
   late final List<DrawingStroke> strokes;
   List<DrawingStroke>? _clearUndo;
@@ -244,8 +302,16 @@ class DrawingDocument extends ChangeNotifier {
 }
 
 class _DrawingEditor extends StatefulWidget {
-  const _DrawingEditor({required this.width, required this.height});
+  const _DrawingEditor({
+    required this.width,
+    required this.height,
+    this.media,
+    required this.rows,
+    required this.columns,
+  });
   final int width, height;
+  final MediaProfile? media;
+  final int rows, columns;
 
   @override
   State<_DrawingEditor> createState() => _DrawingEditorState();
@@ -260,7 +326,13 @@ class _DrawingEditorState extends State<_DrawingEditor> {
   @override
   void initState() {
     super.initState();
-    drawing = DrawingDocument(width: widget.width, height: widget.height);
+    drawing = DrawingDocument(
+      width: widget.width,
+      height: widget.height,
+      media: widget.media,
+      rows: widget.rows,
+      columns: widget.columns,
+    );
   }
 
   @override
@@ -331,6 +403,10 @@ class _DrawingEditorState extends State<_DrawingEditor> {
                   Text(
                     '${widget.width} × ${widget.height} точек · чёрная кисть',
                   ),
+                  if (widget.media != null)
+                    const Text(
+                      'Серые поля и скругления не печатаются. Скрытые штрихи сохраняются в исходнике.',
+                    ),
                   Row(
                     children: [
                       SizedBox(
@@ -541,14 +617,14 @@ class _DrawingSurfaceState extends State<_DrawingSurface> {
 class _DrawingPainter extends CustomPainter {
   _DrawingPainter(this.drawing) : super(repaint: drawing);
   final DrawingDocument drawing;
-  static final Paint _paper = Paint()..color = Colors.white;
+  static final Paint _paper = Paint()..color = const Color(0xffbdbdbd);
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, _paper);
     canvas.save();
     canvas.scale(size.width / drawing.width, size.height / drawing.height);
-    drawing._paint(canvas);
+    drawing.paintPreview(canvas);
     canvas.restore();
   }
 

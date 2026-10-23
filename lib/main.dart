@@ -17,6 +17,8 @@ import 'qr_calibration.dart';
 import 'app_state_store.dart';
 import 'last_printed.dart';
 import 'workspace.dart';
+import 'media_geometry.dart';
+import 'media_calibration.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -112,6 +114,8 @@ class _StudioPageState extends State<StudioPage>
   final printer = PrinterClient();
   final stateStore = AppStateStore();
   late final lastPrinted = LastPrintedHistory(stateStore);
+  MediaProfile _defaultMedia = MediaProfile();
+  String? _mediaError;
   late DesignWorkspace workspace = DesignWorkspace(
     LabelDocument(
       elements: [
@@ -206,6 +210,16 @@ class _StudioPageState extends State<StudioPage>
     String? printed;
     var draftsReadable = true;
     try {
+      final saved = await stateStore.read(AppStateSlot.mediaProfile);
+      if (saved != null) {
+        _defaultMedia = MediaProfile.fromJson(
+          Map<String, dynamic>.from(jsonDecode(saved) as Map),
+        );
+      }
+    } catch (e) {
+      _mediaError = 'Профиль ленты не загружен; размеры не измерены: $e';
+    }
+    try {
       drafts = await stateStore.read(AppStateSlot.workspace);
     } catch (e) {
       draftsReadable = false;
@@ -224,6 +238,9 @@ class _StudioPageState extends State<StudioPage>
           drafts,
           printedSnapshot: printed,
         );
+        if (drafts == null && next.printedRestoreError != null) {
+          next.active.document.media = _defaultMedia;
+        }
         if (!mounted) {
           next.dispose();
           return;
@@ -235,6 +252,9 @@ class _StudioPageState extends State<StudioPage>
               '${_storageError == null ? '' : '${_storageError!}\n'}'
               '${next.printedRestoreError}';
         }
+      } else {
+        document.media = _defaultMedia;
+        activeTab.revision++;
       }
       _stateReady = draftsReadable;
     } catch (e) {
@@ -296,7 +316,42 @@ class _StudioPageState extends State<StudioPage>
     _saveWorkspaceSoon();
   }
 
-  LabelDocument createDesignDocument(String name) => LabelDocument(name: name);
+  LabelDocument createDesignDocument(String name) =>
+      LabelDocument(name: name, media: _defaultMedia);
+
+  void applyMediaProfile(MediaProfile profile) {
+    document.media = profile;
+    viewZoom = 1;
+    viewPan = Offset.zero;
+    changed();
+  }
+
+  Future<void> calibrateMedia() => action(() async {
+    final target = document;
+    final profile = await showMediaCalibration(
+      context,
+      initial: target.media,
+      canPrint:
+          native && printer.connected && !printer.busy && !connection.busy,
+      printPattern: (raster) =>
+          printer.printRaster(raster.packed, raster.height, density: 1),
+      saveProfile: (profile) async {
+        if (!LabelDocument.fitsLayout(profile, target.rows, target.columns)) {
+          throw StateError(
+            'Сначала уменьшите сетку: макет с этой лентой превышает 16 Мпикс.',
+          );
+        }
+        await stateStore.write(
+          AppStateSlot.mediaProfile,
+          jsonEncode(profile.toJson()),
+        );
+      },
+    );
+    if (profile == null || !mounted || document != target) return;
+    _defaultMedia = profile;
+    _mediaError = null;
+    applyMediaProfile(profile);
+  });
 
   Future<void> newDesign() => action(() async {
     final name = await askText('Название макета', 'Новый макет');
@@ -536,6 +591,9 @@ class _StudioPageState extends State<StudioPage>
       context,
       width: target.width,
       height: target.canvasHeight,
+      media: target.media,
+      rows: target.rows,
+      columns: target.columns,
     );
     if (bytes == null || !mounted || document != target) return;
     final element = LabelElement(
@@ -601,6 +659,14 @@ class _StudioPageState extends State<StudioPage>
     try {
       if (!mounted) return;
       final warnings = printWarnings(printedDocument);
+      if (_defaultMedia.isCalibrated &&
+          jsonEncode(printedDocument.media.toJson()) !=
+              jsonEncode(_defaultMedia.toJson())) {
+        warnings.insert(
+          0,
+          'Этот макет использует другой профиль ленты. При необходимости примените сохранённый профиль в настройках этикетки.',
+        );
+      }
       if (warnings.isNotEmpty) {
         final proceed = await showDialog<bool>(
           context: context,
@@ -896,130 +962,192 @@ class _StudioPageState extends State<StudioPage>
     },
   );
 
-  void labelSettings() => unawaited(
-    sheet(
-      'Этикетка и принтер',
-      (context) => StatefulBuilder(
-        builder: (context, update) => Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Одна наклейка: ${document.lengthMm} × 12 мм / '
-              '${document.tileWidth} × 96 точек.\n'
-              'Зазор 8 мм обрабатывает принтер — он не входит в макет.',
-            ),
-            const SizedBox(height: 16),
-            NumberControl(
-              label: 'Длина',
-              value: document.lengthMm.toDouble(),
-              min: 10,
-              max: 150,
-              suffix: 'мм',
-              onChanged: busy
-                  ? null
-                  : (value) {
-                      document.lengthMm = value.round();
-                      changed();
-                      update(() {});
-                    },
-            ),
-            const Divider(height: 24),
-            const Text('Сборка из наклеек · единый макет'),
-            NumberControl(
-              label: 'Столбцы',
-              value: document.columns.toDouble(),
-              min: 1,
-              max: 8,
-              onChanged: busy
-                  ? null
-                  : (value) {
-                      document.columns = value.round();
-                      viewZoom = 1;
-                      viewPan = Offset.zero;
-                      changed();
-                      update(() {});
-                    },
-            ),
-            NumberControl(
-              label: 'Строки',
-              value: document.rows.toDouble(),
-              min: 1,
-              max: 8,
-              onChanged: busy
-                  ? null
-                  : (value) {
-                      document.rows = value.round();
-                      viewZoom = 1;
-                      viewPan = Offset.zero;
-                      changed();
-                      update(() {});
-                    },
-            ),
-            Text(
-              '${document.tileCount} наклеек · '
-              '${document.lengthMm * document.columns} × '
-              '${12 * document.rows} мм.\n'
-              'Печать по строкам слева направо. Между наклейками '
-              'нужно подтвердить размещение; швы на макете не печатаются.',
-              style: const TextStyle(color: StudioColors.muted, fontSize: 12),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: busy
-                  ? null
-                  : () {
-                      document.rotateHalfTurn();
-                      changed();
-                    },
-              icon: const Icon(Icons.rotate_right),
-              label: const Text('Повернуть всю этикетку на 180°'),
-            ),
-            const Divider(height: 32),
-            Text(
-              native
-                  ? connection.message
-                  : 'Bluetooth и печать — только в приложении.',
-              style: const TextStyle(color: StudioColors.blue),
-            ),
-            const SizedBox(height: 12),
-            const Text('Нагрев · 3 — максимум'),
-            const SizedBox(height: 8),
-            SegmentedButton<int>(
-              segments: const [
-                ButtonSegment(value: 0, label: Text('1')),
-                ButtonSegment(value: 1, label: Text('2')),
-                ButtonSegment(value: 2, label: Text('3')),
-              ],
-              selected: {density},
-              onSelectionChanged: busy
-                  ? null
-                  : (value) {
-                      setState(() => density = value.single);
-                      update(() {});
-                    },
-            ),
-            if (!native) ...[
+  void labelSettings() {
+    String? lengthError;
+    unawaited(
+      sheet(
+        'Этикетка и принтер',
+        (context) => StatefulBuilder(
+          builder: (context, update) => Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Одна наклейка: ${document.lengthMm} × ${document.media.widthMm} мм, '
+                'радиус ${document.media.radiusMm} мм.\n'
+                'Бумага: ${document.tileWidth} × ${document.tileHeight} точек; '
+                'головка всегда 96 точек, без масштабирования.\n'
+                '${document.media.name} · ${document.media.isCalibrated ? 'измерено ${document.media.measuredAt!.toLocal()}' : 'геометрия не измерена'}.\n'
+                'Оранжевое поле вне головки не печатается. Зазор между стикерами не входит в макет.',
+              ),
+              if (_defaultMedia.isCalibrated &&
+                  jsonEncode(document.media.toJson()) !=
+                      jsonEncode(_defaultMedia.toJson()))
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.straighten),
+                  label: Text('Применить профиль «${_defaultMedia.name}»'),
+                  onPressed:
+                      busy ||
+                          !LabelDocument.fitsLayout(
+                            _defaultMedia,
+                            document.rows,
+                            document.columns,
+                          )
+                      ? null
+                      : () {
+                          applyMediaProfile(_defaultMedia);
+                          update(() => lengthError = null);
+                        },
+                ),
+              const SizedBox(height: 16),
+              NumberControl(
+                label: 'Длина',
+                value: document.lengthMm.toDouble(),
+                min: 10,
+                max: math.min(
+                  150.0,
+                  (LabelDocument.maxCanvasPixels ~/
+                          (document.tileHeight *
+                              document.rows *
+                              document.columns)) /
+                      mediaDotsPerMm,
+                ),
+                step: 1 / mediaDotsPerMm,
+                suffix: 'мм',
+                onChanged: busy
+                    ? null
+                    : (value) {
+                        try {
+                          document.lengthMm = value;
+                        } on ArgumentError catch (error) {
+                          update(() {
+                            lengthError = error.message.toString();
+                          });
+                          return;
+                        }
+                        changed();
+                        update(() => lengthError = null);
+                      },
+              ),
+              if (lengthError != null)
+                Text(
+                  lengthError!,
+                  key: const ValueKey('media-edit-error'),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              const Divider(height: 24),
+              const Text('Сборка из наклеек · единый макет'),
+              NumberControl(
+                label: 'Столбцы',
+                value: document.columns.toDouble(),
+                min: 1,
+                max: math
+                    .min(
+                      8,
+                      LabelDocument.maxCanvasPixels ~/
+                          (document.tileWidth *
+                              document.tileHeight *
+                              document.rows),
+                    )
+                    .toDouble(),
+                onChanged: busy
+                    ? null
+                    : (value) {
+                        document.columns = value.round();
+                        viewZoom = 1;
+                        viewPan = Offset.zero;
+                        changed();
+                        update(() {});
+                      },
+              ),
+              NumberControl(
+                label: 'Строки',
+                value: document.rows.toDouble(),
+                min: 1,
+                max: math
+                    .min(
+                      8,
+                      LabelDocument.maxCanvasPixels ~/
+                          (document.tileWidth *
+                              document.tileHeight *
+                              document.columns),
+                    )
+                    .toDouble(),
+                onChanged: busy
+                    ? null
+                    : (value) {
+                        document.rows = value.round();
+                        viewZoom = 1;
+                        viewPan = Offset.zero;
+                        changed();
+                        update(() {});
+                      },
+              ),
+              Text(
+                '${document.tileCount} наклеек · '
+                '${document.lengthMm * document.columns} × '
+                '${document.media.widthMm * document.rows} мм.\n'
+                'Печать по строкам слева направо. Между наклейками '
+                'нужно подтвердить размещение; швы на макете не печатаются.',
+                style: const TextStyle(color: StudioColors.muted, fontSize: 12),
+              ),
               const SizedBox(height: 12),
-              const Text(
-                'В браузере работают изображения, текст и QR. '
-                'Шаблоны сохраняются локально в нативном приложении.',
+              OutlinedButton.icon(
+                onPressed: busy
+                    ? null
+                    : () {
+                        document.rotateHalfTurn();
+                        changed();
+                      },
+                icon: const Icon(Icons.rotate_right),
+                label: const Text('Повернуть всю этикетку на 180°'),
+              ),
+              const Divider(height: 32),
+              Text(
+                native
+                    ? connection.message
+                    : 'Bluetooth и печать — только в приложении.',
+                style: const TextStyle(color: StudioColors.blue),
+              ),
+              const SizedBox(height: 12),
+              const Text('Нагрев · 3 — максимум'),
+              const SizedBox(height: 8),
+              SegmentedButton<int>(
+                segments: const [
+                  ButtonSegment(value: 0, label: Text('1')),
+                  ButtonSegment(value: 1, label: Text('2')),
+                  ButtonSegment(value: 2, label: Text('3')),
+                ],
+                selected: {density},
+                onSelectionChanged: busy
+                    ? null
+                    : (value) {
+                        setState(() => density = value.single);
+                        update(() {});
+                      },
+              ),
+              if (!native) ...[
+                const SizedBox(height: 12),
+                const Text(
+                  'В браузере работают изображения, текст и QR. '
+                  'Шаблоны сохраняются локально в нативном приложении.',
+                ),
+              ],
+              const SizedBox(height: 16),
+              TextButton.icon(
+                onPressed: () => showLicensePage(
+                  context: context,
+                  applicationName: 'D110 Studio',
+                  applicationVersion: '1.0.0',
+                ),
+                icon: const Icon(Icons.info_outline),
+                label: const Text('Лицензии приложения и шрифтов'),
               ),
             ],
-            const SizedBox(height: 16),
-            TextButton.icon(
-              onPressed: () => showLicensePage(
-                context: context,
-                applicationName: 'D110 Studio',
-                applicationVersion: '1.0.0',
-              ),
-              icon: const Icon(Icons.info_outline),
-              label: const Text('Лицензии приложения и шрифтов'),
-            ),
-          ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 
   void showObjects() => unawaited(
     sheet(
@@ -1460,10 +1588,21 @@ class _StudioPageState extends State<StudioPage>
             icon: const Icon(Icons.save_outlined),
           ),
           IconButton(
+            tooltip: 'Калибровка ленты',
+            icon: const Icon(Icons.straighten),
+            onPressed: busy ? null : calibrateMedia,
+          ),
+          IconButton(
             tooltip: 'Калибровка QR на принтере',
             icon: const Icon(Icons.qr_code_scanner),
             onPressed: native && printer.connected && !busy && !connection.busy
-                ? () => action(() => showQrCalibration(context, printer))
+                ? () => action(
+                    () => showQrCalibration(
+                      context,
+                      printer,
+                      media: document.media,
+                    ),
+                  )
                 : null,
           ),
           IconButton(
@@ -1493,6 +1632,29 @@ class _StudioPageState extends State<StudioPage>
             child: Column(
               children: [
                 designTabs(),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  child: Text(
+                    '${document.lengthMm} × ${document.media.widthMm} мм · '
+                    'R ${document.media.radiusMm} мм · '
+                    '${document.media.isCalibrated ? 'лента измерена' : 'лента не измерена'}',
+                    style: const TextStyle(
+                      color: StudioColors.muted,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+                if (_mediaError != null)
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      _mediaError!,
+                      style: const TextStyle(color: StudioColors.red),
+                    ),
+                  ),
                 if (_storageError != null)
                   Padding(
                     padding: const EdgeInsets.all(8),
@@ -1799,7 +1961,7 @@ void scaleElement(LabelElement element, double horizontal, double vertical) {
   var minX = math.min(1.0, .000001 / element.width);
   var minY = math.min(1.0, .000001 / element.height);
   var maxX = LabelDocument.maxElementWidth / element.width;
-  var maxY = 2400 / element.height;
+  var maxY = LabelDocument.maxElementHeight / element.height;
   if (stretch) {
     minX = math.max(minX, minTextScale / element.textScaleX);
     minY = math.max(minY, minTextScale / element.textScaleY);
@@ -1857,6 +2019,21 @@ class LabelPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     canvas.scale(scale);
+    canvas.drawRect(
+      Rect.fromLTWH(
+        0,
+        0,
+        document.width.toDouble(),
+        document.canvasHeight.toDouble(),
+      ),
+      Paint()..color = StudioColors.border,
+    );
+    canvas.drawPath(
+      document.paperPath,
+      Paint()..color = StudioColors.accent.withValues(alpha: .35),
+    );
+    canvas.save();
+    canvas.clipPath(document.printablePath, doAntiAlias: false);
     if (preview != null) {
       canvas.drawImage(
         preview!,
@@ -1866,6 +2043,7 @@ class LabelPainter extends CustomPainter {
     } else {
       paintLabel(canvas, document, colorImages: colorImages);
     }
+    canvas.restore();
     paintTileSeams(canvas, document, scale);
   }
 
@@ -1915,7 +2093,7 @@ void paintTileSeams(Canvas canvas, LabelDocument document, double scale) {
     );
   }
   for (var row = 1; row < document.rows; row++) {
-    final y = (row * LabelDocument.height).toDouble();
+    final y = (row * document.tileHeight).toDouble();
     canvas.drawLine(Offset(0, y), Offset(document.width.toDouble(), y), seam);
   }
 }
@@ -2055,11 +2233,9 @@ class NumberControl extends StatefulWidget {
 class _NumberControlState extends State<NumberControl> {
   late final controller = TextEditingController(text: displayValue);
   final focus = FocusNode();
-  String get displayValue => widget.value.abs() > 0 && widget.value.abs() < 1
-      ? widget.value.toStringAsPrecision(3)
-      : widget.value == widget.value.roundToDouble()
+  String get displayValue => widget.value == widget.value.roundToDouble()
       ? widget.value.toStringAsFixed(0)
-      : widget.value.toStringAsFixed(1);
+      : widget.value.toString();
   @override
   void didUpdateWidget(covariant NumberControl oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -2333,7 +2509,7 @@ class _ElementPanelState extends State<ElementPanel> {
           'Высота',
           element.height,
           1,
-          1200,
+          LabelDocument.maxElementHeight,
           (value) => scaleElement(
             element,
             element.aspectLocked ? value / element.height : 1,

@@ -385,7 +385,7 @@ void main() {
         element.x = 0;
         element.y = 0;
         element.width = painter.document.width.toDouble();
-        element.height = LabelDocument.height.toDouble();
+        element.height = painter.document.canvasHeight.toDouble();
         final dynamic page = tester.state(find.byType(StudioPage));
         page.changed();
         await tester.pump();

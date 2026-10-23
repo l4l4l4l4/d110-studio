@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:qr/qr.dart';
 import 'label.dart';
 import 'printer.dart';
+import 'media_geometry.dart';
 
 class QrCalibrationSample {
   const QrCalibrationSample(this.id, this.payload, this.pitch, this.density);
@@ -14,33 +15,37 @@ class QrCalibrationSample {
     errorCorrectLevel: QrErrorCorrectLevel.M,
   ).moduleCount;
 
-  Future<LabelDocument> document() async {
+  Future<LabelDocument> document({required MediaProfile media}) async {
     final side = (modules + 8) * pitch;
-    if (side > LabelDocument.height) {
-      throw StateError('Образец не помещается на печатающей головке');
+    final safe = media.safeRect;
+    if (side > safe.width || side > safe.height) {
+      throw StateError(
+        'Образец с защитной рамкой не помещается на измеренной ленте',
+      );
     }
     final qr = LabelElement(
       kind: ElementKind.qr,
       text: payload,
-      x: 4,
-      y: ((LabelDocument.height - side) ~/ 2).toDouble(),
+      x: safe.left + (safe.width >= side + 4 ? 4 : 0),
+      y: safe.top + ((safe.height - side) ~/ 2),
       width: side.toDouble(),
       height: side.toDouble(),
     );
     final document = LabelDocument(
-      lengthMm: 30,
+      media: media,
       elements: [
         qr,
-        LabelElement(
-          kind: ElementKind.text,
-          text:
-              '$id\n$pitch dots/module\nheat ${density + 1}\nM · $modules modules',
-          fontSize: 11,
-          x: side + 10.0,
-          y: 6,
-          width: 226.0 - side,
-          height: 84,
-        ),
+        if (safe.right - (qr.x + side + 6) >= 36)
+          LabelElement(
+            kind: ElementKind.text,
+            text:
+                '$id\n$pitch dots/module\nheat ${density + 1}\nM · $modules modules',
+            fontSize: 11,
+            x: qr.x + side + 6,
+            y: safe.top,
+            width: safe.right - (qr.x + side + 6),
+            height: safe.height,
+          ),
       ],
     );
     try {
@@ -53,7 +58,8 @@ class QrCalibrationSample {
   }
 }
 
-List<QrCalibrationSample> qrCalibrationPlan() {
+List<QrCalibrationSample> qrCalibrationPlan({required MediaProfile media}) {
+  final safe = media.safeRect;
   final samples = <QrCalibrationSample>[];
   for (var heat = 0; heat < 3; heat++) {
     for (final payload in ['D110-CAL', 'https://s.lalala.ing/AbCdEf12']) {
@@ -63,7 +69,8 @@ List<QrCalibrationSample> qrCalibrationPlan() {
       ).moduleCount;
       for (
         var pitch = 1;
-        pitch * (modules + 8) <= LabelDocument.height;
+        pitch * (modules + 8) <= safe.height &&
+            pitch * (modules + 8) <= safe.width;
         pitch++
       ) {
         samples.add(
@@ -75,22 +82,26 @@ List<QrCalibrationSample> qrCalibrationPlan() {
   return samples;
 }
 
-Future<void> showQrCalibration(BuildContext context, PrinterClient printer) =>
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => _Calibration(printer: printer),
-    );
+Future<void> showQrCalibration(
+  BuildContext context,
+  PrinterClient printer, {
+  required MediaProfile media,
+}) => showDialog<void>(
+  context: context,
+  barrierDismissible: false,
+  builder: (context) => _Calibration(printer: printer, media: media),
+);
 
 class _Calibration extends StatefulWidget {
-  const _Calibration({required this.printer});
+  const _Calibration({required this.printer, required this.media});
   final PrinterClient printer;
+  final MediaProfile media;
   @override
   State<_Calibration> createState() => _CalibrationState();
 }
 
 class _CalibrationState extends State<_Calibration> {
-  final plan = qrCalibrationPlan();
+  late final plan = qrCalibrationPlan(media: widget.media);
   final observations = <Map<String, Object>>[];
   String media = '', printerInfo = '';
   int index = 0;
@@ -110,7 +121,7 @@ class _CalibrationState extends State<_Calibration> {
         final info = await widget.printer.info();
         printerInfo = '${info.model} / ${info.firmware}';
       }
-      document = await sample.document();
+      document = await sample.document(media: widget.media);
       final raster = await renderLabel(document);
       await widget.printer.printRaster(
         raster.packed,
@@ -156,6 +167,7 @@ class _CalibrationState extends State<_Calibration> {
   String report() => const JsonEncoder.withIndent('  ').convert({
     'printer': printerInfo,
     'media': media,
+    'mediaProfile': widget.media.toJson(),
     'at': DateTime.now().toUtc().toIso8601String(),
     'protocol':
         'Three independent scans per printed sample; exact payload required.',
@@ -170,7 +182,7 @@ class _CalibrationState extends State<_Calibration> {
     return PopScope(
       canPop: !printing,
       child: AlertDialog(
-        title: const Text('Калибровка QR · до 15 стикеров'),
+        title: Text('Калибровка QR · ${plan.length} стикеров'),
         content: SizedBox(
           width: 500,
           child: SingleChildScrollView(
@@ -181,6 +193,14 @@ class _CalibrationState extends State<_Calibration> {
                 const Text(
                   'Без физического отпечатка плотность не измерена. Для каждого образца трижды сканируйте код с разного расстояния и проверяйте точный текст, а не только рамку распознавания.',
                 ),
+                Text(
+                  '${widget.media.name}: ${widget.media.lengthMm} × ${widget.media.widthMm} мм, радиус ${widget.media.radiusMm} мм. '
+                  '${widget.media.isCalibrated ? 'Геометрия измерена.' : 'Геометрия не измерена; сначала откалибруйте ленту.'}',
+                ),
+                if (plan.isEmpty)
+                  const Text(
+                    'На этой ленте нет места даже для минимального QR с защитной рамкой.',
+                  ),
                 const SizedBox(height: 12),
                 TextFormField(
                   enabled: !printing && observations.isEmpty,

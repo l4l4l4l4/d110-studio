@@ -6,7 +6,7 @@ Dark Gruvbox Flutter label editor: text, transparent QR codes, images and freeha
 
 **Downloads:** [Linux AppImage, Android APK, Windows EXE](https://github.com/l4l4l4l4/d110-studio/releases/latest). Windows installer is unsigned.
 
-**Use:** connect the classic Bluetooth D110 (not `_BLE`), choose your roll's label length, compose and print. Printable width is 12 mm; heat level 3 is maximum. For 30 mm labels with 8 mm gaps, use 30 mm: gap mode positions the next label automatically, without adding the gap to the image. Leave the QR's 4-module quiet zone clear. Templates are stored on the host, not inside the printer; firmware is not modified.
+**Use:** connect the classic Bluetooth D110 (not `_BLE`), choose or calibrate the physical roll, compose and print. The printhead is fixed at 96 dots (nominally 12 mm); that is not a measurement of the paper width. Heat level 3 is maximum. For 30 mm labels with 8 mm gaps, use 30 mm: gap mode positions the next label automatically, without adding the gap to the image. Leave the QR's 4-module quiet zone clear. Templates are stored on the host, not inside the printer; firmware is not modified.
 
 **Build:** Flutter 3.41.9; `make check`, `make run`, `make apk`, `make apk-debug`, `make appimage`, `make windows`. Nix: `nix develop`. Android requires an Android SDK and JDK 17; release builds additionally require private `android/key.properties`. CI uses the `ANDROID_SIGNING` secret. Do not uninstall an existing signed app to replace it with a differently signed debug APK: that would delete local templates.
 
@@ -35,7 +35,8 @@ unreadable draft storage is not silently overwritten.
 
 `Стек` splits one full-size design into a 1–8 by 1–8 sticker grid without
 rescaling its dots. Canvas seams show the exact crop boundaries. Templates
-save the grid as version 2 and still load version 1 as a single sticker.
+save the grid and media geometry as version 3. Versions 1 and 2 retain their
+artwork and migrate to explicitly unmeasured legacy paper geometry.
 Printing proceeds left-to-right, then top-to-bottom: after each printer
 acknowledgement, an animated placement guide shows the emitted sticker and
 waits for `Наклеено — дальше`. Cancellation settles an in-flight sticker;
@@ -54,8 +55,36 @@ have distinct recovery states.
 with a 1–32-dot black brush, undo and recoverable clear. Save adds movable,
 resizable ink without erasing underlying objects; cancel leaves the design
 unchanged. One-dot taps align to physical pixels. Full-grid ink retains its dot
-scale when saved, reopened or moved, including a 9600×768-dot composition.
-Secondary pointers and interrupted strokes do not commit new ink.
+scale when saved, reopened or moved, including tall compositions. The full
+canvas has a shared 16-megapixel limit. Secondary pointers and interrupted
+strokes do not commit new ink.
+
+## Physical media calibration
+
+Paper length, width, rounded-corner radius and printhead offsets are separate
+from the fixed 96-dot head. Dimensions retain fractional millimetres; offsets
+are whole dots at the application's nominal eight dots/mm. Canvas and stack
+seams show the physical paper; amber areas outside the head cannot print.
+Rendering clips every tile to its rounded paper/head intersection without
+rescaling the artwork. Hidden source ink remains available for later editing.
+
+`Калибровка ленты` prints a reference with labelled dot-centre fiducials,
+accepts measured geometry, then prints a separate verification pattern.
+The reference coordinates remain bound to the pattern actually acknowledged,
+even if the draft length changes afterward. The live geometry diagram remains
+visible while editing measurements. Saving a measured profile requires both
+acknowledged patterns and explicit visual confirmation; a rendered preview or
+an offline save cannot mark a roll as calibrated.
+
+The saved roll becomes the default for new designs. Existing designs retain
+their embedded geometry until the saved profile is explicitly applied. Repeat
+calibration after changing rolls or alignment; invalid edits preserve the
+previous profile and show a recoverable error.
+
+**No stock dimensions or corner radius have been empirically established yet.**
+The initial 30 × 12 mm square-corner profile is nominal, not a measurement.
+Photographs can recover geometry in the printed fiducial coordinate system;
+conversion to millimetres still uses nominal dot pitch, not traceable metrology.
 
 ## Last printed design
 
@@ -72,12 +101,13 @@ saved, not a failed print, and never triggers a second transmission.
 
 ## Physical QR calibration
 
-With a connected printer, the QR calibration action offers up to 15 separate
-30 mm test stickers across all three heat levels. Short-payload candidates
-use 1, 2 and 3 dots/module; realistic short-link candidates use 1 and 2.
-Every sample includes an integer module pitch, a four-module quiet zone and
-printed test metadata. Record the actual roll/media, scan each sample three
-times independently and mark 3/3 or failed, then copy the JSON report.
+With a connected printer, QR calibration offers up to 15 separate stickers
+across all three heat levels. Integer pitches are included only when their
+modules and four-module quiet zone fit the current media's safe rectangle.
+The nominal 30 × 12 mm profile includes short-payload pitches of 1, 2 and
+3 dots/module and realistic short-link pitches of 1 and 2. Every sample prints
+test metadata. Record the actual roll/media, scan each sample three times
+independently and mark 3/3 or failed, then copy the JSON report.
 
 **No maximum reliable QR density has been established yet.** A rendered QR
 or a successful printer acknowledgment is not a successful physical scan.

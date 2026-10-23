@@ -6,6 +6,24 @@ import 'package:d110_studio/label.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('legacy paper stays visibly uncalibrated after template migration', () {
+    final legacy =
+        LabelDocument(
+            elements: [
+              LabelElement(kind: ElementKind.text, text: 'Keep artwork'),
+            ],
+          ).toJson()
+          ..['version'] = 2
+          ..['lengthMm'] = 30
+          ..remove('media');
+    final restored = LabelDocument.fromJson(legacy);
+    addTearDown(restored.dispose);
+    final saved = restored.toJson();
+    expect(saved['version'], 3);
+    expect((saved['media'] as Map)['measuredAt'], isNull);
+    expect(restored.elements.single.text, 'Keep artwork');
+  });
+
   test(
     'maximum-width image templates survive reducing the stack grid',
     () async {
@@ -60,6 +78,8 @@ void main() {
     );
     final legacy = original.toJson()
       ..['version'] = 1
+      ..['lengthMm'] = original.lengthMm
+      ..remove('media')
       ..remove('rows')
       ..remove('columns');
     final migrated = LabelDocument.fromJson(legacy);
@@ -76,7 +96,7 @@ void main() {
     expect(restored.tileWidth, 240);
     expect(restored.width, 480);
     expect(restored.toJson(), migrated.toJson());
-    expect(LabelDocument.height, 96);
+    expect(LabelDocument.printHeadDots, 96);
     final invalid = restored.toJson()..['columns'] = 9;
     expect(() => LabelDocument.fromJson(invalid), throwsFormatException);
   });
