@@ -35,6 +35,7 @@
 namespace {
 constexpr size_t kImageLimit = 16 * 1024 * 1024;
 constexpr size_t kReplyLimit = 64 * 1024;
+constexpr size_t kStateLimit = 64 * 1024 * 1024;
 using Clock = std::chrono::steady_clock;
 using Value = flutter::EncodableValue;
 using Result = std::shared_ptr<flutter::MethodResult<Value>>;
@@ -141,12 +142,14 @@ struct FileHandle {
   FileHandle& operator=(const FileHandle&) = delete;
 };
 
-bool ReadFileContents(const std::wstring& path, bool image, bool missing_ok, Reply& reply) {
+bool ReadFileContents(const std::wstring& path, bool image, bool missing_ok, Reply& reply,
+                      bool state = false) {
   FileHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
   if (file.value == INVALID_HANDLE_VALUE) {
     DWORD number = GetLastError();
     if (missing_ok && (number == ERROR_FILE_NOT_FOUND || number == ERROR_PATH_NOT_FOUND)) {
+      if (state) return true;
       reply.value = Value("[]");
       return true;
     }
@@ -155,7 +158,7 @@ bool ReadFileContents(const std::wstring& path, bool image, bool missing_ok, Rep
   LARGE_INTEGER size;
   if (!GetFileSizeEx(file.value, &size)) return reply.FileError("Reading file size");
   if (GetFileType(file.value) != FILE_TYPE_DISK || size.QuadPart < 0 ||
-      (image && size.QuadPart > static_cast<LONGLONG>(kImageLimit)))
+      ((image || state) && size.QuadPart > static_cast<LONGLONG>(state ? kStateLimit : kImageLimit)))
     return reply.Error("file_error", "Select a regular image file no larger than 16 MiB", ERROR_FILE_TOO_LARGE);
   std::vector<uint8_t> contents;
   contents.reserve(static_cast<size_t>(size.QuadPart));
@@ -164,6 +167,8 @@ bool ReadFileContents(const std::wstring& path, bool image, bool missing_ok, Rep
     DWORD count = 0;
     if (!ReadFile(file.value, buffer, static_cast<DWORD>(sizeof(buffer)), &count, nullptr)) return reply.FileError("Reading file");
     if (count == 0) break;
+    if (state && contents.size() + count > kStateLimit)
+      return reply.Error("file_error", "State exceeds the 64 MiB limit", ERROR_FILE_TOO_LARGE);
     if (image && contents.size() + count > kImageLimit)
       return reply.Error("file_error", "Image exceeds the 16 MiB limit", ERROR_FILE_TOO_LARGE);
     contents.insert(contents.end(), buffer, buffer + count);
@@ -289,6 +294,27 @@ struct DeviceBridge::Impl {
         }
         request.expected = static_cast<int>(expected);
         request.timeout = static_cast<int>(timeout);
+      }
+    } else if (request.method == "readState" || request.method == "writeState") {
+      const Value* value = Argument(args, "slot");
+      const auto* slot = value ? std::get_if<std::string>(value) : nullptr;
+      if (slot && *slot == "lastPrinted") request.path = L"last-printed.json";
+      else if (slot && *slot == "workspace") request.path = L"workspace.json";
+      else if (slot && *slot == "mediaProfile") request.path = L"media-profile.json";
+      else {
+        error.Error("invalid_argument", "Unknown state slot", ERROR_INVALID_PARAMETER);
+        Respond(request.result, std::move(error));
+        return;
+      }
+      if (request.method == "writeState") {
+        value = Argument(args, "json");
+        const auto* json = value ? std::get_if<std::string>(value) : nullptr;
+        if (!json || json->size() > kStateLimit) {
+          error.Error("invalid_argument", "State JSON must not exceed 64 MiB", ERROR_INVALID_PARAMETER);
+          Respond(request.result, std::move(error));
+          return;
+        }
+        request.text = *json;
       }
     } else if (request.method == "saveTemplates") {
       const Value* value = Argument(args, "json");
@@ -696,6 +722,10 @@ struct DeviceBridge::Impl {
         success = TemplateDirectory(reply);
         if (success) success = ReadFileContents(template_directory + L"\\templates.json", false, true, reply);
       } else if (request.method == "saveTemplates") success = SaveText(L"templates.json", request.text, reply);
+      else if (request.method == "readState") {
+        success = TemplateDirectory(reply);
+        if (success) success = ReadFileContents(template_directory + L"\\" + request.path, false, true, reply, true);
+      } else if (request.method == "writeState") success = SaveText(request.path, request.text, reply);
       else if (request.method == "lastPrinterAddress") success = LastPrinterAddress(reply);
       else if (request.method == "saveLastPrinterAddress") success = SaveLastPrinterAddress(request.text, reply);
       else if (request.method == "adapterState") {

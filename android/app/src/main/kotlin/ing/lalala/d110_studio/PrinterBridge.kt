@@ -52,6 +52,7 @@ class PrinterBridge(
         private const val IMAGE_LIMIT = 16 * 1024 * 1024
         private const val RESPONSE_LIMIT = 65536
         private const val WRITE_LIMIT = 1024 * 1024
+        private const val STATE_LIMIT = 64 * 1024 * 1024
         private const val DISCOVERY_SECONDS = 12L
         private val SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
     }
@@ -196,6 +197,22 @@ class PrinterBridge(
                     }
                 }
                 "pickImage" -> pickImage(reply)
+                "readState" -> {
+                    val file = stateFile(call.argument<String>("slot"))
+                    submit(reply) { readState(file) }
+                }
+                "writeState" -> {
+                    val file = stateFile(call.argument<String>("slot"))
+                    val json = call.argument<String>("json")
+                        ?: throw BridgeFailure("invalid_arguments", "State JSON is required")
+                    submit(reply) {
+                        if (json.toByteArray(StandardCharsets.UTF_8).size > STATE_LIMIT) {
+                            throw BridgeFailure("storage_error", "State exceeds the 64 MiB limit")
+                        }
+                        saveText(file, json)
+                        null
+                    }
+                }
                 "loadTemplates" -> submit(reply) { loadTemplates() }
                 "saveTemplates" -> {
                     val json = call.argument<String>("json")
@@ -708,6 +725,41 @@ class PrinterBridge(
 
     private fun templateFile() = AtomicFile(File(activity.filesDir, "templates.json"))
     private fun lastPrinterFile() = AtomicFile(File(activity.filesDir, "last-printer-address"))
+
+    private fun stateFile(slot: String?): AtomicFile {
+        val filename = when (slot) {
+            "lastPrinted" -> "last-printed.json"
+            "workspace" -> "workspace.json"
+            "mediaProfile" -> "media-profile.json"
+            else -> throw BridgeFailure("invalid_arguments", "Unknown state slot")
+        }
+        return AtomicFile(File(activity.filesDir, filename))
+    }
+
+    private fun readState(file: AtomicFile): String? {
+        val bytes = try {
+            file.openRead().use { input ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (output.size() + count > STATE_LIMIT) {
+                        throw BridgeFailure("storage_error", "State exceeds the 64 MiB limit")
+                    }
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            }
+        } catch (failure: FileNotFoundException) {
+            if (!file.baseFile.exists() && !File(file.baseFile.path + ".bak").exists()) return null
+            throw failure
+        }
+        return StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes)).toString()
+    }
 
     private fun loadLastPrinterAddress(): String? {
         val file = lastPrinterFile()

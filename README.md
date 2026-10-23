@@ -47,6 +47,19 @@ unchanged. One-dot taps align to physical pixels. Full-grid ink retains its dot
 scale when saved, reopened or moved, including a 9600×768-dot composition.
 Secondary pointers and interrupted strokes do not commit new ink.
 
+## Last printed design
+
+Startup restores the last user design acknowledged by the printer, without
+sending another print job. The immutable snapshot is captured before rendering
+or transmission; edits made afterward do not change that saved print.
+Failed or ambiguous jobs and QR/media diagnostics do not replace it.
+For a stack, the first acknowledged tile records the original full design once,
+not an isolated tile or an unconfirmed remainder.
+
+History is local to the installation. Corrupt or unwritable storage produces an
+explicit warning. A save failure after acknowledgement means printed-but-not-
+saved, not a failed print, and never triggers a second transmission.
+
 ## Physical QR calibration
 
 With a connected printer, the QR calibration action offers up to 15 separate
