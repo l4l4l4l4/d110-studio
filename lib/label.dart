@@ -173,26 +173,59 @@ class LabelDocument {
   LabelDocument({
     this.name = 'Моя этикетка',
     this.lengthMm = 30,
+    this.rows = 1,
+    this.columns = 1,
     List<LabelElement>? elements,
-  }) : elements = elements ?? [];
+  }) : elements = elements ?? [] {
+    if (rows < 1 || rows > 8 || columns < 1 || columns > 8) {
+      throw ArgumentError('Сетка должна быть от 1×1 до 8×8');
+    }
+  }
   String name;
-  int lengthMm;
+  int lengthMm, rows, columns;
   final List<LabelElement> elements;
-  int get width => lengthMm * 8;
+  int get tileWidth => lengthMm * 8;
+  int get width => tileWidth * columns;
+  int get canvasHeight => height * rows;
+  int get tileCount => rows * columns;
+  static const double maxElementWidth = 9600;
+
+  Rect tileRect(int index) {
+    RangeError.checkValueInInterval(index, 0, tileCount - 1, 'index');
+    return Rect.fromLTWH(
+      (index % columns * tileWidth).toDouble(),
+      (index ~/ columns * height).toDouble(),
+      tileWidth.toDouble(),
+      height.toDouble(),
+    );
+  }
+
   static const int height = 96;
   Map<String, dynamic> toJson() => {
-    'version': 1,
+    'version': 2,
     'name': name,
     'lengthMm': lengthMm,
+    'rows': rows,
+    'columns': columns,
     'elements': elements.map((e) => e.toJson()).toList(),
   };
   factory LabelDocument.fromJson(Map<String, dynamic> json) {
-    if (json['version'] != 1) {
+    if (json['version'] != 1 && json['version'] != 2) {
       throw const FormatException('Неизвестная версия шаблона');
     }
     final length = json['lengthMm'] as int;
     if (length < 10 || length > 150) {
       throw const FormatException('Некорректный размер этикетки');
+    }
+    final rows = json['version'] == 1 ? 1 : json['rows'];
+    final columns = json['version'] == 1 ? 1 : json['columns'];
+    if (rows is! int ||
+        columns is! int ||
+        rows < 1 ||
+        rows > 8 ||
+        columns < 1 ||
+        columns > 8) {
+      throw const FormatException('Некорректная сетка этикеток');
     }
     final items = json['elements'] as List;
     if (items.length > 100) {
@@ -201,6 +234,8 @@ class LabelDocument {
     final document = LabelDocument(
       name: json['name'] as String,
       lengthMm: length,
+      rows: rows,
+      columns: columns,
       elements: items
           .map(
             (e) => LabelElement.fromJson(Map<String, dynamic>.from(e as Map)),
@@ -220,7 +255,7 @@ class LabelDocument {
           ].every((v) => v.isFinite) ||
           e.width <= 0 ||
           e.height <= 0 ||
-          e.width > 2400 ||
+          e.width > maxElementWidth ||
           e.height > 2400 ||
           e.fontSize < 1 ||
           e.fontSize > 300 ||
@@ -236,7 +271,7 @@ class LabelDocument {
   void rotateHalfTurn() {
     for (final e in elements) {
       e.x = width - e.x - e.width;
-      e.y = height - e.y - e.height;
+      e.y = canvasHeight - e.y - e.height;
       e.rotation += math.pi;
     }
   }
@@ -274,7 +309,7 @@ void paintLabel(
       0,
       0,
       document.width.toDouble(),
-      LabelDocument.height.toDouble(),
+      document.canvasHeight.toDouble(),
     ),
     Paint()
       ..color = Colors.white
@@ -286,7 +321,7 @@ void paintLabel(
       0,
       0,
       document.width.toDouble(),
-      LabelDocument.height.toDouble(),
+      document.canvasHeight.toDouble(),
     ),
   );
   final black = Paint()
@@ -368,22 +403,50 @@ void paintLabel(
   canvas.restore();
 }
 
-Future<PrinterRaster> renderLabel(LabelDocument document) async {
+Future<PrinterRaster> renderLabel(LabelDocument document) =>
+    renderTile(document, 0);
+
+/// Rasterize a physical crop, without scaling the overall composition.
+Future<PrinterRaster> renderTile(LabelDocument document, int index) async {
+  final tile = document.tileRect(index);
   final recorder = ui.PictureRecorder();
-  paintLabel(Canvas(recorder), document);
+  final canvas = Canvas(recorder)..translate(-tile.left, -tile.top);
+  paintLabel(canvas, document);
   final picture = recorder.endRecording();
-  final image = await picture.toImage(document.width, LabelDocument.height);
+  final image = await picture.toImage(document.tileWidth, LabelDocument.height);
   picture.dispose();
   final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
   image.dispose();
   if (bytes == null) throw StateError('Не удалось растеризовать этикетку');
   final mono = monochromeRgba(
     bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
-    document.width,
+    document.tileWidth,
     LabelDocument.height,
     const RasterSettings(),
   );
-  return rotateForPrinter(mono, document.width, LabelDocument.height);
+  return rotateForPrinter(mono, document.tileWidth, LabelDocument.height);
+}
+
+/// Full, unrotated printable design for the live canvas.
+Future<ui.Image> renderDesign(LabelDocument document) async {
+  final recorder = ui.PictureRecorder();
+  paintLabel(Canvas(recorder), document);
+  final picture = recorder.endRecording();
+  final image = await picture.toImage(document.width, document.canvasHeight);
+  picture.dispose();
+  final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  image.dispose();
+  if (bytes == null) throw StateError('Не удалось растеризовать макет');
+  return rgbaImage(
+    monochromeRgba(
+      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+      document.width,
+      document.canvasHeight,
+      const RasterSettings(),
+    ),
+    document.width,
+    document.canvasHeight,
+  );
 }
 
 List<String> printWarnings(LabelDocument document) {
@@ -410,7 +473,7 @@ List<String> printWarnings(LabelDocument document) {
     if (cx - halfW < -0.01 ||
         cy - halfH < -0.01 ||
         cx + halfW > document.width + .01 ||
-        cy + halfH > LabelDocument.height + .01) {
+        cy + halfH > document.canvasHeight + .01) {
       warnings.add('Часть элемента выходит за край и будет обрезана.');
     }
   }

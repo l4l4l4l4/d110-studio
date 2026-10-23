@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:d110_studio/label.dart';
@@ -48,6 +49,93 @@ Offset rendered(RenderBox box, LabelPainter painter, Offset labelPoint) {
 }
 
 void main() {
+  testWidgets('moving full-grid artwork does not resize its physical dots', (
+    tester,
+  ) async {
+    final painter = await openEditor(tester, const Size(1000, 700));
+    final document = painter.document;
+    for (final element in document.elements) {
+      element.dispose();
+    }
+    final artwork = LabelElement(
+      kind: ElementKind.image,
+      x: 0,
+      y: 0,
+      width: 9600,
+      height: 768,
+    );
+    document
+      ..lengthMm = 150
+      ..columns = 8
+      ..rows = 8;
+    document.elements
+      ..clear()
+      ..add(artwork);
+    final dynamic page = tester.state(find.byType(StudioPage));
+    page.selected = artwork;
+    page.changed();
+    await tester.pump();
+    final box = tester.renderObject<RenderBox>(gestureSurface());
+    final gesture = await tester.startGesture(
+      rendered(box, painter, const Offset(4800, 384)),
+      kind: ui.PointerDeviceKind.touch,
+    );
+    await gesture.moveBy(const Offset(40, 12));
+    await gesture.moveBy(const Offset(40, 12));
+    await gesture.up();
+    await tester.pump();
+    expect(artwork.width, 9600);
+    expect(artwork.height, 768);
+    expect(artwork.x, greaterThan(0));
+    expect(artwork.y, greaterThan(0));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'grid setup expands live document and placement waits for explicit next',
+    (tester) async {
+      final painter = await openEditor(tester, const Size(420, 900));
+      final sent = <int>[];
+      painter.document.rows = 2;
+      painter.document.columns = 2;
+      final dynamic page = tester.state(find.byType(StudioPage));
+      page.changed();
+      await tester.pump();
+      expect(painter.document.width, 480);
+      expect(painter.document.canvasHeight, 192);
+      unawaited(
+        showDialog<void>(
+          context: tester.element(find.byType(StudioPage)),
+          barrierDismissible: false,
+          builder: (context) => StickerPrintDialog(
+            document: painter.document,
+            printTile: (index) async {
+              sent.add(index);
+            },
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(sent, [0]);
+      expect(find.textContaining('строку 1, столбец 1'), findsOneWidget);
+      await tester.tap(find.text('Наклеено · печатать следующую'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(sent, [0, 1]);
+      expect(find.textContaining('строку 1, столбец 2'), findsOneWidget);
+      await tester.tap(find.text('Отменить сборку'));
+      await tester.pump();
+      await tester.tap(find.text('Закрыть'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(sent, [0, 1]);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets('saving text survives dialog dismissal and keeps its payload', (
     tester,
   ) async {

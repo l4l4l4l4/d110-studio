@@ -9,6 +9,7 @@ import 'printer.dart';
 import 'raster.dart';
 import 'fonts.dart';
 import 'image_picker.dart';
+import 'sticker_stack.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -190,18 +191,7 @@ class _StudioPageState extends State<StudioPage>
     previewTimer?.cancel();
     previewTimer = Timer(const Duration(milliseconds: 80), () async {
       try {
-        final raster = await renderLabel(document);
-        // Undo the printhead rotation for an exact on-screen label preview.
-        final recorder = ui.PictureRecorder();
-        final image = await rgbaImage(raster.rgba, raster.width, raster.height);
-        final canvas = Canvas(recorder)
-          ..translate(0, raster.width.toDouble())
-          ..rotate(-math.pi / 2);
-        canvas.drawImage(image, Offset.zero, Paint());
-        final picture = recorder.endRecording();
-        final next = await picture.toImage(raster.height, raster.width);
-        picture.dispose();
-        image.dispose();
+        final next = await renderDesign(document);
         if (!mounted || version != previewVersion) {
           next.dispose();
           return;
@@ -345,6 +335,7 @@ class _StudioPageState extends State<StudioPage>
   });
   int density = 2;
   Future<void> print() => action(() async {
+    FocusManager.instance.primaryFocus?.unfocus();
     if (document.elements.isEmpty) {
       throw StateError('Добавьте текст, QR или изображение');
     }
@@ -374,6 +365,30 @@ class _StudioPageState extends State<StudioPage>
         ),
       );
       if (proceed != true) return;
+    }
+    if (!mounted) return;
+    if (document.tileCount > 1) {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => StickerPrintDialog(
+          document: document,
+          printTile: (index) async {
+            if (!printer.connected) {
+              throw StateError(
+                'Принтер отключён. Эта сборка остановлена без повторной печати.',
+              );
+            }
+            final raster = await renderTile(document, index);
+            await printer.printRaster(
+              raster.packed,
+              raster.height,
+              density: density,
+            );
+          },
+        ),
+      );
+      return;
     }
     final raster = await renderLabel(document);
     await printer.printRaster(raster.packed, raster.height, density: density);
@@ -605,8 +620,9 @@ class _StudioPageState extends State<StudioPage>
         builder: (context, update) => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Сток: длина 30 мм · печатная ширина 12 мм / 96 точек.\n'
+            Text(
+              'Одна наклейка: ${document.lengthMm} × 12 мм / '
+              '${document.tileWidth} × 96 точек.\n'
               'Зазор 8 мм обрабатывает принтер — он не входит в макет.',
             ),
             const SizedBox(height: 16),
@@ -623,6 +639,46 @@ class _StudioPageState extends State<StudioPage>
                       changed();
                       update(() {});
                     },
+            ),
+            const Divider(height: 24),
+            const Text('Сборка из наклеек · единый макет'),
+            NumberControl(
+              label: 'Столбцы',
+              value: document.columns.toDouble(),
+              min: 1,
+              max: 8,
+              onChanged: busy
+                  ? null
+                  : (value) {
+                      document.columns = value.round();
+                      viewZoom = 1;
+                      viewPan = Offset.zero;
+                      changed();
+                      update(() {});
+                    },
+            ),
+            NumberControl(
+              label: 'Строки',
+              value: document.rows.toDouble(),
+              min: 1,
+              max: 8,
+              onChanged: busy
+                  ? null
+                  : (value) {
+                      document.rows = value.round();
+                      viewZoom = 1;
+                      viewPan = Offset.zero;
+                      changed();
+                      update(() {});
+                    },
+            ),
+            Text(
+              '${document.tileCount} наклеек · '
+              '${document.lengthMm * document.columns} × '
+              '${12 * document.rows} мм.\n'
+              'Печать по строкам слева направо. Между наклейками '
+              'нужно подтвердить размещение; швы на макете не печатаются.',
+              style: const TextStyle(color: StudioColors.muted, fontSize: 12),
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
@@ -727,7 +783,7 @@ class _StudioPageState extends State<StudioPage>
           constraints.maxHeight > constraints.maxWidth * .9;
       final side = math.max(
         document.width.toDouble(),
-        LabelDocument.height.toDouble(),
+        document.canvasHeight.toDouble(),
       );
       final fit = math
           .min(
@@ -746,7 +802,7 @@ class _StudioPageState extends State<StudioPage>
           : constraints.maxHeight;
       final inset = Offset(
         (viewportWidth - document.width * scale) / 2,
-        (viewportHeight - LabelDocument.height * scale) / 2,
+        (viewportHeight - document.canvasHeight * scale) / 2,
       );
       Offset labelPoint(Offset local) => (local - inset) / scale;
       final pan = portrait ? Offset(viewPan.dy, -viewPan.dx) : viewPan;
@@ -917,7 +973,7 @@ class _StudioPageState extends State<StudioPage>
                           left: inset.dx,
                           top: inset.dy,
                           width: document.width * scale,
-                          height: LabelDocument.height * scale,
+                          height: document.canvasHeight * scale,
                           child: Stack(
                             clipBehavior: Clip.none,
                             fit: StackFit.expand,
@@ -1302,7 +1358,7 @@ void scaleElement(LabelElement element, double horizontal, double vertical) {
   final stretch = isText && element.textResizeMode == TextResizeMode.stretch;
   var minX = math.min(1.0, .000001 / element.width);
   var minY = math.min(1.0, .000001 / element.height);
-  var maxX = 2400 / element.width;
+  var maxX = LabelDocument.maxElementWidth / element.width;
   var maxY = 2400 / element.height;
   if (stretch) {
     minX = math.max(minX, minTextScale / element.textScaleX);
@@ -1370,6 +1426,7 @@ class LabelPainter extends CustomPainter {
     } else {
       paintLabel(canvas, document, colorImages: colorImages);
     }
+    paintTileSeams(canvas, document, scale);
   }
 
   @override
@@ -1401,6 +1458,26 @@ class LabelPainter extends CustomPainter {
           point.dy.clamp(bounds.top, bounds.bottom),
         );
   return (rotate: visible(center - half), resize: visible(center + half));
+}
+
+void paintTileSeams(Canvas canvas, LabelDocument document, double scale) {
+  if (document.tileCount == 1) return;
+  final seam = Paint()
+    ..color = StudioColors.blue
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1 / scale;
+  for (var column = 1; column < document.columns; column++) {
+    final x = (column * document.tileWidth).toDouble();
+    canvas.drawLine(
+      Offset(x, 0),
+      Offset(x, document.canvasHeight.toDouble()),
+      seam,
+    );
+  }
+  for (var row = 1; row < document.rows; row++) {
+    final y = (row * LabelDocument.height).toDouble();
+    canvas.drawLine(Offset(0, y), Offset(document.width.toDouble(), y), seam);
+  }
 }
 
 class SelectionPainter extends CustomPainter {
@@ -1790,7 +1867,7 @@ class _ElementPanelState extends State<ElementPanel> {
           'Ширина',
           element.width,
           1,
-          1200,
+          LabelDocument.maxElementWidth,
           (value) => scaleElement(
             element,
             value / element.width,
@@ -1967,6 +2044,268 @@ class _ElementPanelState extends State<ElementPanel> {
       ],
     );
   }
+}
+
+class StickerPrintDialog extends StatefulWidget {
+  const StickerPrintDialog({
+    required this.document,
+    required this.printTile,
+    super.key,
+  });
+  final LabelDocument document;
+  final Future<void> Function(int index) printTile;
+  @override
+  State<StickerPrintDialog> createState() => _StickerPrintDialogState();
+}
+
+class _StickerPrintDialogState extends State<StickerPrintDialog> {
+  late final job = StickerPrintJob(
+    tileCount: widget.document.tileCount,
+    printTile: widget.printTile,
+  );
+  bool placementReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    job.addListener(jobChanged);
+    unawaited(job.printNext());
+  }
+
+  void jobChanged() {
+    if (mounted) setState(() => placementReady = false);
+  }
+
+  @override
+  void dispose() {
+    job.removeListener(jobChanged);
+    job.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final document = widget.document;
+    final placing = job.phase == StickerPrintPhase.placement;
+    final printing = job.phase == StickerPrintPhase.printing;
+    final terminal = switch (job.phase) {
+      StickerPrintPhase.completed ||
+      StickerPrintPhase.failed ||
+      StickerPrintPhase.cancelled => true,
+      _ => false,
+    };
+    final tile = math.max(0, job.index);
+    final status = switch (job.phase) {
+      StickerPrintPhase.ready => 'Подготовка сборки',
+      StickerPrintPhase.printing =>
+        'Печать ${tile + 1} / ${job.tileCount} · ожидаем подтверждение принтера',
+      StickerPrintPhase.placement =>
+        'Наклейте ${tile + 1} в строку ${tile ~/ document.columns + 1}, '
+            'столбец ${tile % document.columns + 1}',
+      StickerPrintPhase.completed => 'Все наклейки размещены',
+      StickerPrintPhase.cancelled =>
+        job.transactionActive
+            ? 'Отменено. Уже отправленная наклейка ещё может напечататься; '
+                  'ожидаем завершение текущей операции.'
+            : 'Сборка отменена. Следующие наклейки не отправлены.',
+      StickerPrintPhase.failed =>
+        'Сборка остановлена на наклейке ${tile + 1}. '
+            'Результат этой операции может быть неизвестен. '
+            'Повторная печать не запускается.\n${job.error}\n'
+            'Проверьте принтер и уже вышедшие наклейки перед новым заданием.',
+    };
+    return PopScope(
+      canPop: false,
+      child: Dialog.fullscreen(
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Text(
+                  'Сборка ${document.rows} × ${document.columns}',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 12),
+                LinearProgressIndicator(
+                  value: printing
+                      ? null
+                      : ((tile +
+                                    (placing ||
+                                            job.phase ==
+                                                StickerPrintPhase.completed
+                                        ? 1
+                                        : 0)) /
+                                job.tileCount)
+                            .clamp(0.0, 1.0),
+                ),
+                const SizedBox(height: 12),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 160),
+                  child: SingleChildScrollView(
+                    child: Text(
+                      status,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: job.phase == StickerPrintPhase.failed
+                            ? StudioColors.red
+                            : StudioColors.text,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final scale = math.min(
+                        constraints.maxWidth / document.width,
+                        constraints.maxHeight / document.canvasHeight,
+                      );
+                      return Center(
+                        child: SizedBox(
+                          width: document.width * scale,
+                          height: document.canvasHeight * scale,
+                          child: TweenAnimationBuilder<double>(
+                            key: ValueKey('${job.index}-${job.phase.name}'),
+                            tween: Tween(begin: 0, end: placing ? 1 : 0),
+                            duration: const Duration(milliseconds: 650),
+                            curve: Curves.easeOutCubic,
+                            onEnd: placing
+                                ? () {
+                                    if (mounted &&
+                                        job.phase ==
+                                            StickerPrintPhase.placement) {
+                                      setState(() => placementReady = true);
+                                    }
+                                  }
+                                : null,
+                            builder: (context, progress, child) => CustomPaint(
+                              painter: StickerPlacementPainter(
+                                document,
+                                scale,
+                                tile,
+                                placing ||
+                                    job.phase == StickerPrintPhase.completed,
+                                progress,
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Порядок: слева направо, затем следующая строка. '
+                  'Ориентация макета соответствует размещению; зазор ленты '
+                  'не добавляется к сборке.',
+                  style: TextStyle(color: StudioColors.muted, fontSize: 12),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    if (!terminal)
+                      OutlinedButton(
+                        onPressed: job.cancel,
+                        child: const Text('Отменить сборку'),
+                      ),
+                    if (placing)
+                      FilledButton(
+                        onPressed: placementReady
+                            ? () => unawaited(job.printNext())
+                            : null,
+                        child: Text(
+                          tile + 1 == job.tileCount
+                              ? 'Наклеено · завершить'
+                              : 'Наклеено · печатать следующую',
+                        ),
+                      ),
+                    if (terminal)
+                      FilledButton(
+                        onPressed: job.transactionActive
+                            ? null
+                            : () => Navigator.pop(context),
+                        child: const Text('Закрыть'),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class StickerPlacementPainter extends CustomPainter {
+  StickerPlacementPainter(
+    this.document,
+    this.scale,
+    this.index,
+    this.acknowledged,
+    this.progress,
+  );
+  final LabelDocument document;
+  final double scale, progress;
+  final int index;
+  final bool acknowledged;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.scale(scale);
+    paintLabel(canvas, document);
+    for (var i = 0; i < document.tileCount; i++) {
+      final rect = document.tileRect(i);
+      if (i > index || (i == index && !acknowledged)) {
+        canvas.drawRect(rect, Paint()..color = const Color(0xaa282828));
+      }
+      final label = TextPainter(
+        text: TextSpan(
+          text: '${i + 1}',
+          style: TextStyle(
+            fontSize: 14 / scale,
+            color: StudioColors.blue,
+            backgroundColor: StudioColors.bg,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      label.paint(canvas, rect.topLeft + Offset(4 / scale, 4 / scale));
+      label.dispose();
+    }
+    paintTileSeams(canvas, document, scale);
+    if (acknowledged) {
+      final rect = document.tileRect(index);
+      // Show the acknowledged sticker arriving at its actual grid position.
+      final target = rect.shift(Offset(0, -(1 - progress) * rect.height * .7));
+      canvas.drawRect(
+        target,
+        Paint()
+          ..color = StudioColors.accent.withValues(alpha: .15 + .15 * progress),
+      );
+      canvas.drawRect(
+        target.deflate(2 / scale),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3 / scale
+          ..color = StudioColors.accent,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant StickerPlacementPainter oldDelegate) =>
+      oldDelegate.index != index ||
+      oldDelegate.acknowledged != acknowledged ||
+      oldDelegate.progress != progress ||
+      oldDelegate.scale != scale;
 }
 
 class DeviceDialog extends StatefulWidget {

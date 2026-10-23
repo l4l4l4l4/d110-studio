@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:d110_studio/raster.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -5,6 +6,128 @@ import 'package:d110_studio/label.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'maximum-width image templates survive reducing the stack grid',
+    () async {
+      final image = await rgbaImage(Uint8List.fromList([0, 0, 0, 255]), 1, 1);
+      final png = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      final document = LabelDocument(
+        lengthMm: 150,
+        columns: 8,
+        rows: 8,
+        elements: [
+          LabelElement(
+            kind: ElementKind.image,
+            imageBytes: png!.buffer.asUint8List(
+              png.offsetInBytes,
+              png.lengthInBytes,
+            ),
+            width: 9600,
+            height: 768,
+          ),
+        ],
+      );
+      addTearDown(document.dispose);
+      final restored = LabelDocument.fromJson(document.toJson());
+      addTearDown(restored.dispose);
+      expect(restored.elements.single.width, 9600);
+      restored
+        ..columns = 1
+        ..rows = 1;
+      final reduced = LabelDocument.fromJson(restored.toJson());
+      addTearDown(reduced.dispose);
+      expect(reduced.elements.single.width, 9600);
+      expect(reduced.elements.single.height, 768);
+      reduced.elements.single.width = 9601;
+      expect(
+        () => LabelDocument.fromJson(reduced.toJson()),
+        throwsFormatException,
+      );
+    },
+  );
+
+  test('v1 templates migrate losslessly and grid documents roundtrip', () {
+    final original = LabelDocument(
+      elements: [
+        LabelElement(
+          kind: ElementKind.text,
+          text: 'Across seams',
+          x: 230,
+          y: 90,
+        ),
+      ],
+    );
+    final legacy = original.toJson()
+      ..['version'] = 1
+      ..remove('rows')
+      ..remove('columns');
+    final migrated = LabelDocument.fromJson(legacy);
+    expect(migrated.rows, 1);
+    expect(migrated.columns, 1);
+    expect(
+      migrated.elements.single.toJson(),
+      original.elements.single.toJson(),
+    );
+    migrated.rows = 3;
+    migrated.columns = 2;
+    final restored = LabelDocument.fromJson(migrated.toJson());
+    expect(restored.canvasHeight, 288);
+    expect(restored.tileWidth, 240);
+    expect(restored.width, 480);
+    expect(restored.toJson(), migrated.toJson());
+    expect(LabelDocument.height, 96);
+    final invalid = restored.toJson()..['columns'] = 9;
+    expect(() => LabelDocument.fromJson(invalid), throwsFormatException);
+  });
+
+  test(
+    'tiles crop exact seam pixels without squeezing the full composition',
+    () async {
+      final image = await rgbaImage(
+        monochromeRgba(
+          Uint8List.fromList([0, 0, 0, 255]),
+          1,
+          1,
+          const RasterSettings(),
+        ),
+        1,
+        1,
+      );
+      final marker = LabelElement(
+        kind: ElementKind.image,
+        x: 79,
+        y: 95,
+        width: 2,
+        height: 2,
+      )..image = image;
+      final document = LabelDocument(
+        lengthMm: 10,
+        rows: 2,
+        columns: 2,
+        elements: [marker],
+      );
+      try {
+        for (var index = 0; index < 4; index++) {
+          final raster = await renderTile(document, index);
+          expect(raster.width, 96);
+          expect(raster.height, 80);
+          final x = index.isEven ? 79 : 0;
+          final y = index < 2 ? 95 : 0;
+          final blackPixel = (x * 96 + (95 - y)) * 4;
+          expect(raster.rgba[blackPixel], 0, reason: 'tile $index corner');
+          expect(
+            raster.rgba.where((value) => value == 0).length,
+            3,
+            reason: 'exactly one black RGB pixel in tile $index',
+          );
+        }
+      } finally {
+        document.dispose();
+      }
+    },
+  );
+
   test(
     'live image settings rebuild printable pixels and retain color source',
     () async {
