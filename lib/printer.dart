@@ -5,10 +5,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class PrinterDevice {
-  const PrinterDevice({required this.name, required this.address});
+  const PrinterDevice({
+    required this.name,
+    required this.address,
+    this.supportsSpp,
+  });
 
   final String name;
   final String address;
+  final bool? supportsSpp;
 }
 
 class PrinterInfo {
@@ -97,6 +102,12 @@ class PrinterClient extends ChangeNotifier {
   }
 
   final MethodChannel _channel;
+  static final _d110Name = RegExp(
+    r'(^|[^a-z0-9])d110($|[^a-z0-9])',
+    caseSensitive: false,
+  );
+  static final _bleName = RegExp(r'(^|[^a-z0-9])ble', caseSensitive: false);
+  String? _rememberedAddress;
   bool _connected = false;
   bool _busy = false;
   bool _disposed = false;
@@ -163,28 +174,49 @@ class PrinterClient extends ChangeNotifier {
         code: 'bridge_error',
       );
     }
-    return result
-        .map((value) {
-          if (value is! Map ||
-              value['name'] is! String ||
-              value['address'] is! String) {
-            throw const PrinterException(
-              'The device bridge returned an invalid device',
-              code: 'bridge_error',
-            );
-          }
-          return PrinterDevice(
-            name: value['name'] as String,
-            address: value['address'] as String,
-          );
-        })
-        .toList(growable: false);
+    final candidates = <PrinterDevice>[];
+    for (final value in result) {
+      if (value is! Map ||
+          value['name'] is! String ||
+          value['address'] is! String ||
+          !value.containsKey('classic') ||
+          !value.containsKey('spp') ||
+          (value['classic'] != null && value['classic'] is! bool) ||
+          (value['spp'] != null && value['spp'] is! bool)) {
+        throw const PrinterException(
+          'The device bridge returned invalid device capabilities',
+          code: 'bridge_error',
+        );
+      }
+      final name = value['name'] as String;
+      final address = (value['address'] as String).toUpperCase();
+      final known = address == _rememberedAddress;
+      // A prior D110 handshake outweighs stale cached service/name metadata.
+      // It cannot turn a BLE-only endpoint into a classic RFCOMM transport.
+      if (value['classic'] == false ||
+          (!known &&
+              (value['spp'] == false ||
+                  _bleName.hasMatch(name) ||
+                  !_d110Name.hasMatch(name)))) {
+        continue;
+      }
+      candidates.add(
+        PrinterDevice(
+          name: name,
+          address: address,
+          supportsSpp: value['spp'] as bool?,
+        ),
+      );
+    }
+    return candidates;
   });
 
   /// Local storage and passive adapter inspection never request OS permissions.
   Future<String?> lastPrinterAddress() async {
     _requireActive();
-    return _channel.invokeMethod<String>('lastPrinterAddress');
+    final address = await _channel.invokeMethod<String>('lastPrinterAddress');
+    _rememberedAddress = address?.trim().toUpperCase();
+    return _rememberedAddress;
   }
 
   Future<BluetoothAdapterState> adapterState() => _singleFlight(() async {
@@ -248,6 +280,7 @@ class PrinterClient extends ChangeNotifier {
       await _channel.invokeMethod<void>('saveLastPrinterAddress', {
         'address': normalized,
       });
+      _rememberedAddress = normalized;
       _requireActive();
       if (generation != _disconnectGeneration) {
         throw const PrinterException(

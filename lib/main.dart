@@ -2981,7 +2981,7 @@ class _DeviceDialogState extends State<DeviceDialog> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              'Включите принтер. Выберите классический Bluetooth D110, не имя с суффиксом _BLE.',
+              'Показаны кандидаты D110 с классическим Bluetooth. BLE/GATT-устройства и несовместимые сервисы скрыты. Модель проверяется при подключении.',
             ),
             const SizedBox(height: 16),
             FutureBuilder<List<PrinterDevice>>(
@@ -3001,7 +3001,7 @@ class _DeviceDialogState extends State<DeviceDialog> {
                 final found = snapshot.data!;
                 if (found.isEmpty) {
                   return const Text(
-                    'Устройства не найдены. На десктопе сначала найдите принтер в настройках Bluetooth или введите MAC.',
+                    'Подходящие D110 не найдены. На десктопе сначала найдите принтер в настройках Bluetooth или введите его MAC.',
                   );
                 }
                 return Column(
@@ -3010,7 +3010,9 @@ class _DeviceDialogState extends State<DeviceDialog> {
                         (device) => ListTile(
                           leading: const Icon(Icons.print_outlined),
                           title: Text(device.name),
-                          subtitle: Text(device.address),
+                          subtitle: Text(
+                            '${device.address}\n${device.supportsSpp == true ? 'Serial Port Profile' : 'Сервис проверится при подключении'}',
+                          ),
                           onTap: () => Navigator.pop(context, device.address),
                         ),
                       )

@@ -385,9 +385,9 @@ class PrinterBridge(
             intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
         }
 
-    private fun discoverDevices(): List<Map<String, String>> {
+    private fun discoverDevices(): List<Map<String, Any?>> {
         val adapter = enabledAdapter()
-        val devices = linkedMapOf<String, Map<String, String>>()
+        val devices = linkedMapOf<String, Map<String, Any?>>()
         val finished = CountDownLatch(1)
         val discoveryFailure = AtomicReference<Exception?>()
         fun add(device: BluetoothDevice) {
@@ -395,7 +395,16 @@ class PrinterBridge(
                 device.type != BluetoothDevice.DEVICE_TYPE_DUAL) return
             val address = device.address
             val name = device.name?.takeIf { it.isNotBlank() } ?: address
-            synchronized(devices) { devices[address] = mapOf("name" to name, "address" to address) }
+            val services = device.uuids
+            val spp = services?.takeIf { it.isNotEmpty() }?.any { it.uuid == SPP_UUID }
+            synchronized(devices) {
+                devices[address] = mapOf(
+                    "name" to name,
+                    "address" to address,
+                    "classic" to true,
+                    "spp" to spp,
+                )
+            }
         }
         adapter.bondedDevices.forEach { add(it) }
         val receiver = object : BroadcastReceiver() {
@@ -429,7 +438,7 @@ class PrinterBridge(
             if (destroyed) throw BridgeFailure("disposed", "The device bridge has been closed")
             discoveryFailure.get()?.let { throw it }
             return synchronized(devices) {
-                devices.values.sortedWith(compareBy<Map<String, String>> { it["name"] }.thenBy { it["address"] })
+                devices.values.sortedWith(compareBy<Map<String, Any?>> { it["name"] as String }.thenBy { it["address"] as String })
             }
         } finally {
             try {

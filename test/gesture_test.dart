@@ -65,7 +65,7 @@ void main() {
           return {'available': true, 'enabled': true, 'permitted': true};
         case 'devices':
           return [
-            {'name': 'D110', 'address': address, 'paired': true},
+            {'name': 'D110', 'address': address, 'classic': true, 'spp': true},
           ];
         case 'exchange':
           return Uint8List.fromList('D110'.codeUnits);

@@ -51,6 +51,13 @@ the picker. Declining leaves the editor usable without an error-only dialog.
 Missing adapters, denied permissions, cancelled requests and discovery errors
 have distinct recovery states.
 
+The picker excludes BLE-only twins, unrelated device names and devices known
+not to expose classic Serial Port Profile. An unverified classic D110 with
+unknown cached service metadata remains a candidate until the protocol
+handshake; a previously verified classic address may survive renaming or stale
+service metadata. Missing cached UUIDs are not proof of incompatibility.
+This printer uses classic RFCOMM/SPP, not a BLE GATT print service.
+
 `Рисунок` opens a finger/mouse canvas at the full design's physical dot size,
 with a 1–32-dot black brush, undo and recoverable clear. Save adds movable,
 resizable ink without erasing underlying objects; cancel leaves the design
