@@ -26,6 +26,7 @@
 namespace {
 constexpr size_t kImageLimit = 16 * 1024 * 1024;
 constexpr size_t kReplyLimit = 64 * 1024;
+constexpr size_t kStateLimit = 64 * 1024 * 1024;
 using Clock = std::chrono::steady_clock;
 using Call = std::shared_ptr<FlMethodCall>;
 
@@ -107,11 +108,13 @@ FlValue* Argument(FlValue* args, const char* name, FlValueType type) {
   return value && fl_value_get_type(value) == type ? value : nullptr;
 }
 
-bool ReadFile(const std::string& path, bool image, bool missing_ok, Reply& reply) {
+bool ReadFile(const std::string& path, bool image, bool missing_ok, Reply& reply,
+              bool state = false) {
   int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
   if (fd < 0) {
     int number = errno;
     if (missing_ok && number == ENOENT) {
+      if (state) return true;
       reply.kind = Reply::kText;
       reply.text = "[]";
       return true;
@@ -124,7 +127,8 @@ bool ReadFile(const std::string& path, bool image, bool missing_ok, Reply& reply
     close(fd);
     return reply.Error("file_error", "Reading file metadata: " + std::string(std::strerror(number)), number);
   }
-  if (!S_ISREG(metadata.st_mode) || (image && metadata.st_size > static_cast<off_t>(kImageLimit))) {
+  if (!S_ISREG(metadata.st_mode) ||
+      ((image || state) && metadata.st_size > static_cast<off_t>(state ? kStateLimit : kImageLimit))) {
     close(fd);
     return reply.Error("file_error", "Select a regular image file no larger than 16 MiB", EFBIG);
   }
@@ -140,6 +144,10 @@ bool ReadFile(const std::string& path, bool image, bool missing_ok, Reply& reply
       return reply.Error("file_error", "Reading file: " + std::string(std::strerror(number)), number);
     }
     if (count == 0) break;
+    if (state && contents.size() + static_cast<size_t>(count) > kStateLimit) {
+      close(fd);
+      return reply.Error("file_error", "State exceeds the 64 MiB limit", EFBIG);
+    }
     if (image && contents.size() + static_cast<size_t>(count) > kImageLimit) {
       close(fd);
       return reply.Error("file_error", "Image exceeds the 16 MiB limit", EFBIG);
@@ -277,6 +285,26 @@ struct DeviceBridge::Impl {
         }
         request.expected = static_cast<int>(fl_value_get_int(expected));
         request.timeout = static_cast<int>(fl_value_get_int(timeout));
+      }
+    } else if (request.method == "readState" || request.method == "writeState") {
+      FlValue* slot = Argument(args, "slot", FL_VALUE_TYPE_STRING);
+      const std::string name = slot ? fl_value_get_string(slot) : "";
+      if (name == "lastPrinted") request.path = "last-printed.json";
+      else if (name == "workspace") request.path = "workspace.json";
+      else if (name == "mediaProfile") request.path = "media-profile.json";
+      else {
+        error.Error("invalid_argument", "Unknown state slot", EINVAL);
+        Respond(call, error);
+        return;
+      }
+      if (request.method == "writeState") {
+        FlValue* json = Argument(args, "json", FL_VALUE_TYPE_STRING);
+        if (!json || std::strlen(fl_value_get_string(json)) > kStateLimit) {
+          error.Error("invalid_argument", "State JSON must not exceed 64 MiB", EINVAL);
+          Respond(call, error);
+          return;
+        }
+        request.text = fl_value_get_string(json);
       }
     } else if (request.method == "saveTemplates") {
       FlValue* json = Argument(args, "json", FL_VALUE_TYPE_STRING);
@@ -619,6 +647,8 @@ struct DeviceBridge::Impl {
       else if (request.method == "pickImage") success = ReadFile(request.path, true, false, reply);
       else if (request.method == "loadTemplates") success = ReadFile(template_directory + "/templates.json", false, true, reply);
       else if (request.method == "saveTemplates") success = SaveText("templates.json", request.text, reply);
+      else if (request.method == "readState") success = ReadFile(template_directory + "/" + request.path, false, true, reply, true);
+      else if (request.method == "writeState") success = SaveText(request.path, request.text, reply);
       else if (request.method == "lastPrinterAddress") success = LastPrinterAddress(reply);
       else if (request.method == "saveLastPrinterAddress") success = SaveLastPrinterAddress(request.text, reply);
       else if (request.method == "adapterState") success = AdapterState(reply);

@@ -14,6 +14,8 @@ import 'printer_connection.dart';
 import 'drawing.dart';
 import 'shortener.dart';
 import 'qr_calibration.dart';
+import 'app_state_store.dart';
+import 'last_printed.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -107,6 +109,8 @@ class StudioPage extends StatefulWidget {
 class _StudioPageState extends State<StudioPage>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final printer = PrinterClient();
+  final stateStore = AppStateStore();
+  late final lastPrinted = LastPrintedHistory(stateStore);
   LabelDocument document = LabelDocument(
     elements: [
       LabelElement(
@@ -123,7 +127,7 @@ class _StudioPageState extends State<StudioPage>
   List<Map<String, dynamic>> templates = [];
   late final connection = PrinterConnectionController(printer);
   String? error;
-  bool busy = false, preview = false;
+  bool busy = true, preview = false;
   bool inspectorOpen = false, colorImages = false;
   ui.Image? previewImage;
   Timer? previewTimer;
@@ -159,6 +163,7 @@ class _StudioPageState extends State<StudioPage>
     WidgetsBinding.instance.addObserver(this);
     connection.addListener(_connectionChanged);
     selected = document.elements.first;
+    unawaited(_restoreLastPrinted());
     if (native) unawaited(_loadTemplates());
     if (native) unawaited(connection.restore());
   }
@@ -172,6 +177,31 @@ class _StudioPageState extends State<StudioPage>
     if (native && state == AppLifecycleState.resumed && !busy) {
       unawaited(connection.restore());
     }
+  }
+
+  Future<void> _restoreLastPrinted() async {
+    try {
+      final next = await lastPrinted.restore();
+      if (next != null) {
+        if (!mounted) {
+          next.dispose();
+          return;
+        }
+        document.dispose();
+        document = next;
+        selected = next.elements.firstOrNull;
+        revision++;
+      }
+    } catch (e) {
+      if (mounted) error = 'Не удалось открыть последний отпечаток: $e';
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _recordPrinted(LastPrintedJob job) async {
+    final warning = await job.confirmed();
+    if (mounted && warning != null) setState(() => error = warning);
   }
 
   Future<void> _loadTemplates() async {
@@ -400,67 +430,70 @@ class _StudioPageState extends State<StudioPage>
     if (document.elements.isEmpty) {
       throw StateError('Добавьте текст, QR или изображение');
     }
-    for (final element in document.elements) {
-      if (element.kind == ElementKind.qr || element.kind == ElementKind.image) {
-        await element.prepare();
+    final job = LastPrintedJob.capture(document, lastPrinted);
+    final printedDocument = await job.prepare();
+    try {
+      if (!mounted) return;
+      final warnings = printWarnings(printedDocument);
+      if (warnings.isNotEmpty) {
+        final proceed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Проверьте макет'),
+            content: Text(warnings.join('\n\n')),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Исправить'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Печатать как есть'),
+              ),
+            ],
+          ),
+        );
+        if (proceed != true) return;
       }
-    }
-    if (!mounted) return;
-    final warnings = printWarnings(document);
-    if (warnings.isNotEmpty) {
-      final proceed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Проверьте макет'),
-          content: Text(warnings.join('\n\n')),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Исправить'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Печатать как есть'),
-            ),
-          ],
-        ),
-      );
-      if (proceed != true) return;
-    }
-    if (!mounted) return;
-    if (document.tileCount > 1) {
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => StickerPrintDialog(
-          document: document,
-          printTile: (index) async {
-            if (!printer.connected) {
-              throw StateError(
-                'Принтер отключён. Эта сборка остановлена без повторной печати.',
+      if (!mounted) return;
+      if (printedDocument.tileCount > 1) {
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => StickerPrintDialog(
+            document: printedDocument,
+            printTile: (index) async {
+              if (!printer.connected) {
+                throw StateError(
+                  'Принтер отключён. Эта сборка остановлена без повторной печати.',
+                );
+              }
+              final raster = await renderTile(printedDocument, index);
+              await printer.printRaster(
+                raster.packed,
+                raster.height,
+                density: density,
               );
-            }
-            final raster = await renderTile(document, index);
-            await printer.printRaster(
-              raster.packed,
-              raster.height,
-              density: density,
-            );
-          },
+              await _recordPrinted(job);
+            },
+          ),
+        );
+        return;
+      }
+      final raster = await renderLabel(printedDocument);
+      await printer.printRaster(raster.packed, raster.height, density: density);
+      await _recordPrinted(job);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Принтер подтвердил завершение задания. Проверьте этикетку.',
+          ),
         ),
       );
-      return;
+    } finally {
+      printedDocument.dispose();
     }
-    final raster = await renderLabel(document);
-    await printer.printRaster(raster.packed, raster.height, density: density);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Принтер подтвердил завершение задания. Проверьте этикетку.',
-        ),
-      ),
-    );
   });
   Future<void> save() => action(() async {
     final name = await askText('Название шаблона', document.name);
