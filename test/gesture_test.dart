@@ -140,6 +140,95 @@ void main() {
     }
   });
 
+  testWidgets('full-grid freehand ink survives template reload at dot scale', (
+    tester,
+  ) async {
+    final painter = await openEditor(tester, const Size(420, 900));
+    final document = painter.document;
+    for (final element in document.elements) {
+      element.dispose();
+    }
+    document.elements.clear();
+    document.lengthMm = 150;
+    document.columns = 8;
+    document.rows = 8;
+    final marker = await tester.runAsync(() async {
+      final recorder = ui.PictureRecorder();
+      ui.Canvas(recorder).drawColor(Colors.black, ui.BlendMode.src);
+      final picture = recorder.endRecording();
+      try {
+        return await picture.toImage(1, 1);
+      } finally {
+        picture.dispose();
+      }
+    });
+    final markerPng = await tester.runAsync(
+      () => marker!.toByteData(format: ui.ImageByteFormat.png),
+    );
+    document.elements.add(
+      LabelElement(
+        kind: ElementKind.image,
+        x: 10,
+        y: 10,
+        width: 1,
+        height: 1,
+        imageBytes: markerPng!.buffer.asUint8List(
+          markerPng.offsetInBytes,
+          markerPng.lengthInBytes,
+        ),
+      )..image = marker,
+    );
+    final dynamic page = tester.state(find.byType(StudioPage));
+    page.changed();
+    await tester.pump();
+    late Future<void> drawing;
+    await tester.runAsync(() async {
+      drawing = page.draw() as Future<void>;
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    tester.widget<Slider>(find.byType(Slider)).onChanged!(1);
+    await tester.pump();
+    final paper = tester.getRect(find.byKey(const ValueKey('drawing-paper')));
+    await tester.tapAt(
+      paper.topLeft +
+          Offset(paper.width * 4800.5 / 9600, paper.height * 384.5 / 768),
+    );
+    await tester.pump();
+    final onSave =
+        tester
+                .widget<FilledButton>(
+                  find.widgetWithText(FilledButton, 'Сохранить'),
+                )
+                .onPressed!
+            as Future<void> Function();
+    await tester.runAsync(() async {
+      await onSave();
+      await drawing;
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    final reopened = LabelDocument.fromJson(document.toJson());
+    await tester.runAsync(() async {
+      for (final element in reopened.elements) {
+        await element.prepare();
+      }
+    });
+    final image = await tester.runAsync(() => renderDesign(reopened));
+    try {
+      final pixels = await tester.runAsync(
+        () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
+      );
+      expect(pixels!.getUint8((10 * 9600 + 10) * 4), 0);
+      expect(pixels.getUint8((384 * 9600 + 4800) * 4), 0);
+      expect(pixels.getUint8(0), 255);
+    } finally {
+      image?.dispose();
+      reopened.dispose();
+    }
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('moving full-grid artwork does not resize its physical dots', (
     tester,
   ) async {

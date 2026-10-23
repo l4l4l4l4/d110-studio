@@ -18,7 +18,7 @@ class DecodedLabelImage {
   final int sourceHeight;
 }
 
-/// Decodes the first frame without upscaling, limiting its longest edge.
+/// Decodes the first frame without upscaling, bounding its longest edge and area.
 ///
 /// Native decoding reads descriptor metadata and requests a bounded frame.
 /// Web encoded descriptors do not expose dimensions. Flutter's web
@@ -28,9 +28,13 @@ class DecodedLabelImage {
 Future<DecodedLabelImage> decodeLabelImage(
   Uint8List bytes, {
   int maxDimension = 512,
+  int? maxPixels,
 }) async {
   if (maxDimension < 1) {
     throw ArgumentError.value(maxDimension, 'maxDimension', 'Must be positive');
+  }
+  if (maxPixels != null && maxPixels < 1) {
+    throw ArgumentError.value(maxPixels, 'maxPixels', 'Must be positive');
   }
 
   ui.ImmutableBuffer? buffer;
@@ -47,7 +51,12 @@ Future<DecodedLabelImage> decodeLabelImage(
       descriptor = await ui.ImageDescriptor.encoded(buffer);
       sourceWidth = descriptor.width;
       sourceHeight = descriptor.height;
-      final target = _targetSize(sourceWidth, sourceHeight, maxDimension);
+      final target = _targetSize(
+        sourceWidth,
+        sourceHeight,
+        maxDimension,
+        maxPixels,
+      );
       codec = await descriptor.instantiateCodec(
         targetWidth: target.width,
         targetHeight: target.height,
@@ -57,7 +66,12 @@ Future<DecodedLabelImage> decodeLabelImage(
     if (kIsWeb) {
       sourceWidth = image.width;
       sourceHeight = image.height;
-      final target = _targetSize(sourceWidth, sourceHeight, maxDimension);
+      final target = _targetSize(
+        sourceWidth,
+        sourceHeight,
+        maxDimension,
+        maxPixels,
+      );
       if (target.width != sourceWidth || target.height != sourceHeight) {
         final resized = await _resizeImage(image, target.width, target.height);
         image.dispose();
@@ -79,12 +93,23 @@ Future<DecodedLabelImage> decodeLabelImage(
   }
 }
 
-({int width, int height}) _targetSize(int width, int height, int maxDimension) {
-  final factor = math.min(1.0, maxDimension / math.max(width, height));
-  return (
-    width: math.max(1, (width * factor).round()),
-    height: math.max(1, (height * factor).round()),
-  );
+({int width, int height}) _targetSize(
+  int width,
+  int height,
+  int maxDimension,
+  int? maxPixels,
+) {
+  var factor = math.min(1.0, maxDimension / math.max(width, height));
+  if (maxPixels != null) {
+    factor = math.min(factor, math.sqrt(maxPixels / (width * height)));
+  }
+  var targetWidth = math.max(1, (width * factor).round());
+  var targetHeight = math.max(1, (height * factor).round());
+  if (maxPixels != null) {
+    targetWidth = math.min(targetWidth, maxPixels);
+    targetHeight = math.min(targetHeight, maxPixels ~/ targetWidth);
+  }
+  return (width: targetWidth, height: targetHeight);
 }
 
 Future<ui.Image> _resizeImage(ui.Image source, int width, int height) async {
