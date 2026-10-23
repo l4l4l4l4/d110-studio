@@ -12,4 +12,10 @@ Dark Gruvbox Flutter label editor: text, transparent QR codes and images; drag, 
 
 `make check` covers text/QR payload preservation and text-dialog save, cancel and outside-click dismissal, alongside touch gestures and raster output. Text-entry fields own their controllers until the dialog route is unmounted; completing `showDialog` does not end the outgoing route's lifetime.
 
+Resize and rotation use distinct nearest touch targets. The gesture surface
+extends beyond the label paper, and selection handles stay inside the visible
+viewport after resizing, rotation, zoom and pan. `make check` includes four
+consecutive text resizes at both zero and nonzero rotation, plus overlapping
+handles on a small rotated object.
+
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)
