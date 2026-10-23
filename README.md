@@ -33,4 +33,13 @@ acknowledgement, an animated placement guide shows the emitted sticker and
 waits for `Наклеено — дальше`. Cancellation settles an in-flight sticker;
 an ambiguous failure stops the job without retrying or replaying it.
 
+The last printer address is saved only after a successful D110 handshake.
+Native launch/resume makes one passive reconnect attempt without prompting for
+missing permissions or replaying prints. Android offers the system Bluetooth
+enable request; desktop opens Bluetooth settings and provides return guidance.
+First-use connection obtains permission and Bluetooth enable before opening
+the picker. Declining leaves the editor usable without an error-only dialog.
+Missing adapters, denied permissions, cancelled requests and discovery errors
+have distinct recovery states.
+
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)

@@ -7,6 +7,13 @@
 #include <bluetoothapis.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shellapi.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Devices.Radios.h>
+
+// C++/WinRT radio inspection; no programmatic power changes are requested.
+#pragma comment(lib, "windowsapp")
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
@@ -241,7 +248,10 @@ struct DeviceBridge::Impl {
       std::lock_guard<std::mutex> lock(completion_mutex);
       pending.swap(completions);
     }
-    for (auto& completion : pending) Respond(completion.first, std::move(completion.second));
+    for (auto& completion : pending) {
+      if (completion.first) Respond(completion.first, std::move(completion.second));
+      else channel->InvokeMethod("disconnected", std::make_unique<Value>());
+    }
   }
 
   void Handle(const flutter::MethodCall<Value>& call,
@@ -251,7 +261,7 @@ struct DeviceBridge::Impl {
     request.method = call.method_name();
     Reply error;
     const Value* args = call.arguments();
-    if (request.method == "connect") {
+    if (request.method == "connect" || request.method == "saveLastPrinterAddress") {
       const Value* value = Argument(args, "address");
       const auto* address = value ? std::get_if<std::string>(value) : nullptr;
       if (!address) {
@@ -292,7 +302,9 @@ struct DeviceBridge::Impl {
     } else if (request.method == "pickImage") {
       PickImage(std::move(request));
       return;
-    } else if (request.method != "devices" && request.method != "disconnect" && request.method != "loadTemplates") {
+    } else if (request.method != "devices" && request.method != "disconnect" &&
+               request.method != "loadTemplates" && request.method != "lastPrinterAddress" &&
+               request.method != "adapterState" && request.method != "requestEnableBluetooth") {
       request.result->NotImplemented();
       return;
     }
@@ -364,6 +376,7 @@ struct DeviceBridge::Impl {
       shutdown(socket_handle, SD_BOTH);
       closesocket(socket_handle);
       socket_handle = INVALID_SOCKET;
+      if (!stopping.load()) Complete(Result{}, Reply{});
     }
   }
 
@@ -397,7 +410,71 @@ struct DeviceBridge::Impl {
     }
   }
 
+  void CheckDisconnect() {
+    if (socket_handle == INVALID_SOCKET) return;
+    fd_set activity;
+    FD_ZERO(&activity);
+    FD_SET(socket_handle, &activity);
+    timeval timeout{};
+    if (select(0, &activity, nullptr, nullptr, &timeout) <= 0) return;
+    char byte;
+    int count = recv(socket_handle, &byte, 1, MSG_PEEK);
+    if (count == 0 || (count == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)) CloseSocket();
+  }
+
+  bool AdapterState(Reply& reply, bool& available, bool& enabled) {
+    struct Apartment {
+      HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+    } apartment;
+    if (FAILED(apartment.result))
+      return reply.Error("bluetooth_error", "Initializing radio inspection", static_cast<DWORD>(apartment.result));
+    try {
+      using namespace winrt::Windows::Devices::Radios;
+      auto pending = Radio::GetRadiosAsync();
+      if (pending.wait_for(std::chrono::seconds(5)) == winrt::Windows::Foundation::AsyncStatus::Started) {
+        pending.Cancel();
+        return reply.Error("timeout", "Bluetooth adapter inspection timed out", WAIT_TIMEOUT);
+      }
+      for (const auto& radio : pending.get()) {
+        if (radio.Kind() != RadioKind::Bluetooth) continue;
+        available = true;
+        enabled = enabled || radio.State() == RadioState::On;
+      }
+      reply.value = flutter::EncodableMap{
+          {Value("available"), Value(available)}, {Value("enabled"), Value(enabled)},
+          {Value("permitted"), Value(true)}};
+      return true;
+    } catch (const winrt::hresult_error& error) {
+      const DWORD number = static_cast<DWORD>(error.code().value);
+      return reply.Error(number == static_cast<DWORD>(E_ACCESSDENIED) ? "permission_denied" : "bluetooth_error",
+          "Inspecting Bluetooth radios: " + winrt::to_string(error.message()), number);
+    }
+  }
+
+  bool RequireAdapter(Reply& reply) {
+    bool available = false, enabled = false;
+    if (!AdapterState(reply, available, enabled)) return false;
+    reply.value = Value{};
+    if (!available) return reply.Error("bluetooth_unavailable", "No Bluetooth adapter is available", ERROR_NOT_FOUND);
+    if (!enabled) return reply.Error("bluetooth_disabled", "Turn on Bluetooth in system settings", ERROR_NOT_READY);
+    return true;
+  }
+
+  bool RequestEnable(Reply& reply) {
+    bool available = false, enabled = false;
+    if (!AdapterState(reply, available, enabled)) return false;
+    if (!available) return reply.Error("bluetooth_unavailable", "No Bluetooth adapter is available", ERROR_NOT_FOUND);
+    if (enabled) { reply.value = Value("enabled"); return true; }
+    auto launched = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"ms-settings:bluetooth", nullptr, nullptr, SW_SHOWNORMAL));
+    if (launched <= 32) return reply.Error("settings_unavailable", "Open Windows Bluetooth settings to enable Bluetooth", static_cast<DWORD>(launched));
+    // Opening Settings cannot tell us whether the user enabled Bluetooth.
+    reply.value = Value("settings_opened");
+    return true;
+  }
+
   bool Connect(const std::string& address, Reply& reply) {
+    if (!RequireAdapter(reply)) return false;
     BTH_ADDR parsed;
     if (!ParseAddress(address, parsed))
       return reply.Error("invalid_argument", "Bluetooth address must be XX:XX:XX:XX:XX:XX", ERROR_INVALID_PARAMETER);
@@ -486,6 +563,7 @@ struct DeviceBridge::Impl {
   }
 
   bool Devices(Reply& reply) {
+    if (!RequireAdapter(reply)) return false;
     BLUETOOTH_DEVICE_SEARCH_PARAMS search{};
     search.dwSize = sizeof(search);
     search.fReturnAuthenticated = TRUE;
@@ -536,7 +614,7 @@ struct DeviceBridge::Impl {
     return true;
   }
 
-  bool SaveTemplates(const std::string& json, Reply& reply) {
+  bool SaveText(const std::wstring& filename, const std::string& json, Reply& reply) {
     if (!TemplateDirectory(reply)) return false;
     if (!CreateDirectoryW(template_directory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
       return reply.FileError("Creating template directory");
@@ -567,10 +645,28 @@ struct DeviceBridge::Impl {
     }
     if (success && !FlushFileBuffers(file)) success = reply.FileError("Flushing templates");
     if (!CloseHandle(file) && success) success = reply.FileError("Closing templates");
-    if (success && !MoveFileExW(temporary.c_str(), (template_directory + L"\\templates.json").c_str(),
+    if (success && !MoveFileExW(temporary.c_str(), (template_directory + L"\\" + filename).c_str(),
         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) success = reply.FileError("Replacing templates");
     if (!success) DeleteFileW(temporary.c_str());
     return success;
+  }
+
+  bool LastPrinterAddress(Reply& reply) {
+    if (!TemplateDirectory(reply) ||
+        !ReadFileContents(template_directory + L"\\last-printer-address", false, true, reply)) return false;
+    const auto* text = std::get_if<std::string>(&reply.value);
+    if (text && *text == "[]") { reply.value = Value{}; return true; }
+    BTH_ADDR address;
+    if (!text || !ParseAddress(*text, address))
+      return reply.Error("storage_error", "Saved printer address is invalid", ERROR_INVALID_DATA);
+    return true;
+  }
+
+  bool SaveLastPrinterAddress(const std::string& text, Reply& reply) {
+    BTH_ADDR address;
+    if (!ParseAddress(text, address))
+      return reply.Error("invalid_address", "Invalid Bluetooth address", ERROR_INVALID_PARAMETER);
+    return SaveText(L"last-printer-address", text, reply);
   }
 
   void Run() {
@@ -578,8 +674,13 @@ struct DeviceBridge::Impl {
       Request request;
       {
         std::unique_lock<std::mutex> lock(queue_mutex);
-        ready.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+        if (socket_handle != INVALID_SOCKET) {
+          ready.wait_for(lock, std::chrono::milliseconds(500), [this] { return stopping.load() || !queue.empty(); });
+        } else {
+          ready.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+        }
         if (stopping.load()) break;
+        if (queue.empty()) { lock.unlock(); CheckDisconnect(); continue; }
         request = std::move(queue.front());
         queue.pop_front();
       }
@@ -594,7 +695,13 @@ struct DeviceBridge::Impl {
       else if (request.method == "loadTemplates") {
         success = TemplateDirectory(reply);
         if (success) success = ReadFileContents(template_directory + L"\\templates.json", false, true, reply);
-      } else if (request.method == "saveTemplates") success = SaveTemplates(request.text, reply);
+      } else if (request.method == "saveTemplates") success = SaveText(L"templates.json", request.text, reply);
+      else if (request.method == "lastPrinterAddress") success = LastPrinterAddress(reply);
+      else if (request.method == "saveLastPrinterAddress") success = SaveLastPrinterAddress(request.text, reply);
+      else if (request.method == "adapterState") {
+        bool available = false, enabled = false;
+        success = AdapterState(reply, available, enabled);
+      } else if (request.method == "requestEnableBluetooth") success = RequestEnable(reply);
       if (!success && (request.method == "connect" || request.method == "write" || request.method == "exchange")) CloseSocket();
       Complete(std::move(request.result), std::move(reply));
     }

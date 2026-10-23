@@ -48,6 +48,7 @@ class PrinterBridge(
     companion object {
         private const val PERMISSION_REQUEST = 11031
         private const val IMAGE_REQUEST = 11032
+        private const val ENABLE_REQUEST = 11033
         private const val IMAGE_LIMIT = 16 * 1024 * 1024
         private const val RESPONSE_LIMIT = 65536
         private const val WRITE_LIMIT = 1024 * 1024
@@ -75,6 +76,7 @@ class PrinterBridge(
     @Volatile private var documentInput: InputStream? = null
     private var pendingPermission: PermissionAction? = null
     private var pendingImage: Reply? = null
+    private var pendingEnable: Reply? = null
 
     private class BridgeFailure(val code: String, message: String) : IOException(message)
     private data class PermissionAction(
@@ -125,6 +127,23 @@ class PrinterBridge(
         }
         try {
             when (call.method) {
+                "lastPrinterAddress" -> submit(reply) { loadLastPrinterAddress() }
+                "saveLastPrinterAddress" -> {
+                    val address = call.argument<String>("address")
+                        ?: throw BridgeFailure("invalid_arguments", "Bluetooth address is required")
+                    if (!BluetoothAdapter.checkBluetoothAddress(address)) {
+                        throw BridgeFailure("invalid_address", "Invalid Bluetooth address")
+                    }
+                    submit(reply) {
+                        saveText(lastPrinterFile(), address)
+                        null
+                    }
+                }
+                // Passive inspection must not bring up a permission dialog.
+                "adapterState" -> submit(reply) { adapterState() }
+                "requestEnableBluetooth" -> withBluetoothPermissions(false, reply) {
+                    requestEnableBluetooth(reply)
+                }
                 "devices" -> withBluetoothPermissions(true, reply) {
                     submit(reply) { discoverDevices() }
                 }
@@ -278,7 +297,46 @@ class PrinterBridge(
         } else if (denied) {
             pending.reply.error("permission_denied", "Allow Nearby Devices (or Location on Android 11 and earlier) to use Bluetooth")
         } else {
-            pending.action()
+            try {
+                pending.action()
+            } catch (failure: Exception) {
+                reportFailure(pending.reply, failure)
+            }
+        }
+    }
+
+    private fun adapterState(): Map<String, Any?> {
+        val manager = activity.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = manager?.adapter
+        val canReadAdapter = Build.VERSION.SDK_INT < 31 ||
+            activity.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        val permitted = canReadAdapter && (Build.VERSION.SDK_INT < 31 ||
+            activity.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED)
+        return mapOf(
+            "available" to (adapter != null),
+            "enabled" to if (adapter != null && canReadAdapter) adapter.isEnabled else null,
+            "permitted" to permitted,
+        )
+    }
+
+    private fun requestEnableBluetooth(reply: Reply) {
+        if (pendingEnable != null) {
+            reply.error("busy", "A Bluetooth enable request is already open")
+            return
+        }
+        val manager = activity.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = manager?.adapter
+            ?: throw BridgeFailure("bluetooth_unavailable", "This device has no Bluetooth adapter")
+        if (adapter.isEnabled) {
+            reply.success("enabled")
+            return
+        }
+        pendingEnable = reply
+        try {
+            activity.startActivityForResult(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), ENABLE_REQUEST)
+        } catch (failure: Exception) {
+            pendingEnable = null
+            reportFailure(reply, failure)
         }
     }
 
@@ -531,6 +589,18 @@ class PrinterBridge(
     }
 
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == ENABLE_REQUEST) {
+            val reply = pendingEnable ?: return
+            pendingEnable = null
+            try {
+                val state = adapterState()
+                // RESULT_CANCELED remains declined even if some other app enabled it.
+                reply.success(if (resultCode == Activity.RESULT_OK && state["enabled"] == true) "enabled" else "declined")
+            } catch (failure: Exception) {
+                reportFailure(reply, failure)
+            }
+            return
+        }
         if (requestCode != IMAGE_REQUEST) return
         val reply = pendingImage ?: return
         pendingImage = null
@@ -637,6 +707,21 @@ class PrinterBridge(
     }
 
     private fun templateFile() = AtomicFile(File(activity.filesDir, "templates.json"))
+    private fun lastPrinterFile() = AtomicFile(File(activity.filesDir, "last-printer-address"))
+
+    private fun loadLastPrinterAddress(): String? {
+        val file = lastPrinterFile()
+        val address = try {
+            file.openRead().use { String(it.readBytes(), StandardCharsets.US_ASCII).trim() }
+        } catch (failure: FileNotFoundException) {
+            if (!file.baseFile.exists() && !File(file.baseFile.path + ".bak").exists()) return null
+            throw failure
+        }
+        if (!BluetoothAdapter.checkBluetoothAddress(address)) {
+            throw BridgeFailure("storage_error", "Saved printer address is invalid")
+        }
+        return address
+    }
 
     private fun loadTemplates(): String {
         val file = templateFile()
@@ -652,11 +737,12 @@ class PrinterBridge(
             .decode(ByteBuffer.wrap(bytes)).toString()
     }
 
-    private fun saveTemplates(json: String) {
-        val file = templateFile()
+    private fun saveTemplates(json: String) = saveText(templateFile(), json)
+
+    private fun saveText(file: AtomicFile, text: String) {
         val output = file.startWrite()
         try {
-            output.write(json.toByteArray(StandardCharsets.UTF_8))
+            output.write(text.toByteArray(StandardCharsets.UTF_8))
             file.finishWrite(output)
         } catch (failure: Exception) {
             file.failWrite(output)
@@ -672,6 +758,7 @@ class PrinterBridge(
         channel.setMethodCallHandler(null)
         pendingPermission = null
         pendingImage = null
+        pendingEnable = null
         replies.toList().forEach { it.error("disposed", "The device bridge has been closed") }
         worker.shutdownNow()
         watchdog.execute {

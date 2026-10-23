@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class PrinterDevice {
@@ -65,17 +67,31 @@ class PrinterStatus {
   }
 }
 
+class BluetoothAdapterState {
+  const BluetoothAdapterState({
+    required this.available,
+    required this.enabled,
+    required this.permitted,
+  });
+
+  final bool available;
+  // Null means the OS will not disclose power state before permission is granted.
+  final bool? enabled;
+  final bool permitted;
+}
+
+enum BluetoothEnableResult { enabled, declined, settingsOpened }
+
 /// Classic Bluetooth transport for the hardware-verified AiYin D110 only.
 ///
 /// A failed/ambiguous exchange closes the connection. A print is never retried:
 /// the label may already have been printed when its acknowledgement is lost.
-class PrinterClient {
+class PrinterClient extends ChangeNotifier {
   PrinterClient({MethodChannel? channel})
     : _channel = channel ?? const MethodChannel('d110_studio/device') {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'disconnected') {
-        _connected = false;
-        _disconnectGeneration++;
+        _markDisconnected();
       }
     });
   }
@@ -83,11 +99,29 @@ class PrinterClient {
   final MethodChannel _channel;
   bool _connected = false;
   bool _busy = false;
+  bool _disposed = false;
   int _disconnectGeneration = 0;
 
   bool get connected => _connected;
+  bool get busy => _busy;
+
+  void _markDisconnected() {
+    _connected = false;
+    _disconnectGeneration++;
+    if (!_disposed) notifyListeners();
+  }
+
+  void _requireActive() {
+    if (_disposed) {
+      throw const PrinterException(
+        'The printer client is closed',
+        code: 'disposed',
+      );
+    }
+  }
 
   Future<T> _singleFlight<T>(Future<T> Function() action) async {
+    _requireActive();
     if (_busy) {
       throw const PrinterException(
         'A printer operation is already in progress',
@@ -99,6 +133,7 @@ class PrinterClient {
       return await action();
     } finally {
       _busy = false;
+      if (_disposed) await _closeAfterFailure();
     }
   }
 
@@ -112,7 +147,7 @@ class PrinterClient {
   }
 
   Future<void> _closeAfterFailure() async {
-    _connected = false;
+    _markDisconnected();
     try {
       await _channel.invokeMethod<void>('disconnect');
     } catch (_) {
@@ -146,6 +181,48 @@ class PrinterClient {
         .toList(growable: false);
   });
 
+  /// Local storage and passive adapter inspection never request OS permissions.
+  Future<String?> lastPrinterAddress() async {
+    _requireActive();
+    return _channel.invokeMethod<String>('lastPrinterAddress');
+  }
+
+  Future<BluetoothAdapterState> adapterState() => _singleFlight(() async {
+    final value = await _channel.invokeMapMethod<String, Object?>(
+      'adapterState',
+    );
+    if (value == null ||
+        value['available'] is! bool ||
+        value['permitted'] is! bool ||
+        (value['enabled'] != null && value['enabled'] is! bool)) {
+      throw const PrinterException(
+        'Invalid Bluetooth adapter state',
+        code: 'bridge_error',
+      );
+    }
+    return BluetoothAdapterState(
+      available: value['available'] as bool,
+      enabled: value['enabled'] as bool?,
+      permitted: value['permitted'] as bool,
+    );
+  });
+
+  Future<BluetoothEnableResult> requestEnableBluetooth() =>
+      _singleFlight(() async {
+        final result = await _channel.invokeMethod<String>(
+          'requestEnableBluetooth',
+        );
+        return switch (result) {
+          'enabled' => BluetoothEnableResult.enabled,
+          'declined' => BluetoothEnableResult.declined,
+          'settings_opened' => BluetoothEnableResult.settingsOpened,
+          _ => throw const PrinterException(
+            'Invalid Bluetooth enable result',
+            code: 'bridge_error',
+          ),
+        };
+      });
+
   Future<void> connect(String address) => _singleFlight(() async {
     final normalized = address.trim().toUpperCase();
     if (!RegExp(r'^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$').hasMatch(normalized)) {
@@ -157,6 +234,7 @@ class PrinterClient {
     _connected = false;
     try {
       await _channel.invokeMethod<void>('connect', {'address': normalized});
+      _requireActive();
       final generation = _disconnectGeneration;
       await _readModel();
       if (generation != _disconnectGeneration) {
@@ -165,7 +243,20 @@ class PrinterClient {
           code: 'disconnected',
         );
       }
+      _requireActive();
+      // Only an accepted D110 model handshake may replace the last good address.
+      await _channel.invokeMethod<void>('saveLastPrinterAddress', {
+        'address': normalized,
+      });
+      _requireActive();
+      if (generation != _disconnectGeneration) {
+        throw const PrinterException(
+          'The printer disconnected while saving its address',
+          code: 'disconnected',
+        );
+      }
       _connected = true;
+      notifyListeners();
     } catch (_) {
       await _closeAfterFailure();
       rethrow;
@@ -173,7 +264,7 @@ class PrinterClient {
   });
 
   Future<void> disconnect() => _singleFlight(() async {
-    _connected = false;
+    _markDisconnected();
     await _channel.invokeMethod<void>('disconnect');
   });
 
@@ -372,4 +463,16 @@ class PrinterClient {
 
   Future<void> saveTemplates(String json) =>
       _channel.invokeMethod<void>('saveTemplates', {'json': json});
+
+  /// Detaches events immediately; an in-flight transaction closes when it unwinds.
+  /// It is never replayed, including when a print acknowledgement was lost.
+  @override
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _connected = false;
+    _channel.setMethodCallHandler(null);
+    if (!_busy) unawaited(_closeAfterFailure());
+    super.dispose();
+  }
 }
