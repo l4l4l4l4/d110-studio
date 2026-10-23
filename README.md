@@ -42,4 +42,11 @@ the picker. Declining leaves the editor usable without an error-only dialog.
 Missing adapters, denied permissions, cancelled requests and discovery errors
 have distinct recovery states.
 
+`Рисунок` opens a finger/mouse canvas at the full design's physical dot size,
+with a 1–32-dot black brush, undo and recoverable clear. Save adds movable,
+resizable ink without erasing underlying objects; cancel leaves the design
+unchanged. One-dot taps align to physical pixels. Full-grid ink retains its dot
+scale when saved, reopened or moved, including a 9600×768-dot composition.
+Secondary pointers and interrupted strokes do not commit new ink.
+
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)

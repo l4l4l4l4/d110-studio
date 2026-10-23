@@ -34,6 +34,7 @@ class LabelElement {
     this.textScaleX = 1,
     this.textScaleY = 1,
     this.imageBytes,
+    this.inkOnly = false,
     this.settings = const RasterSettings(),
   });
   final ElementKind kind;
@@ -44,6 +45,7 @@ class LabelElement {
   TextResizeMode textResizeMode;
   double textScaleX, textScaleY;
   Uint8List? imageBytes;
+  final bool inkOnly;
   RasterSettings settings;
   ui.Image? image;
   ui.Image? colorImage;
@@ -74,6 +76,7 @@ class LabelElement {
     'textScaleX': textScaleX,
     'textScaleY': textScaleY,
     'image': imageBytes == null ? null : base64Encode(imageBytes!),
+    'inkOnly': inkOnly,
     'settings': settings.toJson(),
   };
   factory LabelElement.fromJson(Map<String, dynamic> json) => LabelElement(
@@ -99,6 +102,7 @@ class LabelElement {
     imageBytes: json['image'] == null
         ? null
         : base64Decode(json['image'] as String),
+    inkOnly: json['inkOnly'] as bool? ?? false,
     settings: RasterSettings.fromJson(
       Map<String, dynamic>.from(json['settings'] as Map),
     ),
@@ -120,7 +124,11 @@ class LabelElement {
       );
     } else if (kind == ElementKind.image && imageBytes != null) {
       if (_sourceRgba == null) {
-        final decoded = await decodeLabelImage(imageBytes!);
+        final decoded = await decodeLabelImage(
+          imageBytes!,
+          maxDimension: inkOnly ? 9600 : 512,
+          maxPixels: inkOnly ? 16 * 1024 * 1024 : null,
+        );
         try {
           final rgba = await decoded.image.toByteData(
             format: ui.ImageByteFormat.rawStraightRgba,
@@ -395,6 +403,7 @@ void paintLabel(
         rect,
         Paint()
           ..filterQuality = FilterQuality.none
+          ..blendMode = e.inkOnly ? BlendMode.multiply : BlendMode.srcOver
           ..isAntiAlias = false,
       );
     }

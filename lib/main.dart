@@ -11,6 +11,7 @@ import 'fonts.dart';
 import 'image_picker.dart';
 import 'sticker_stack.dart';
 import 'printer_connection.dart';
+import 'drawing.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -320,6 +321,42 @@ class _StudioPageState extends State<StudioPage>
       return;
     }
     document.elements.add(element);
+    selected = element;
+    preview = false;
+    changed();
+  });
+
+  Future<void> draw() => action(() async {
+    final target = document;
+    if (target.elements.length >= 100) {
+      throw StateError('На этикетке уже 100 элементов');
+    }
+    final bytes = await showDrawingEditor(
+      context,
+      width: target.width,
+      height: target.canvasHeight,
+    );
+    if (bytes == null || !mounted || document != target) return;
+    final element = LabelElement(
+      kind: ElementKind.image,
+      imageBytes: bytes,
+      inkOnly: true,
+      x: 0,
+      y: 0,
+      width: target.width.toDouble(),
+      height: target.canvasHeight.toDouble(),
+    );
+    try {
+      await element.prepare();
+      if (!mounted || document != target) {
+        element.dispose();
+        return;
+      }
+    } catch (_) {
+      element.dispose();
+      rethrow;
+    }
+    target.elements.add(element);
     selected = element;
     preview = false;
     changed();
@@ -1280,6 +1317,11 @@ class _StudioPageState extends State<StudioPage>
                               Icons.add_photo_alternate_outlined,
                               'Фото',
                               busy ? null : () => add(ElementKind.image),
+                            ),
+                            tool(
+                              Icons.draw_outlined,
+                              'Рисунок',
+                              busy ? null : draw,
                             ),
                             tool(
                               Icons.edit_outlined,
