@@ -12,6 +12,7 @@ import 'image_picker.dart';
 import 'sticker_stack.dart';
 import 'printer_connection.dart';
 import 'drawing.dart';
+import 'shortener.dart';
 import 'qr_calibration.dart';
 
 void main() {
@@ -298,10 +299,13 @@ class _StudioPageState extends State<StudioPage>
       element.x = 4;
       element.y = 4;
     } else {
-      final value = await askText(
-        kind == ElementKind.qr ? 'Содержимое QR' : 'Текст',
-        kind == ElementKind.qr ? 'https://example.com' : 'Новый текст',
-      );
+      if (!mounted) return;
+      String? value;
+      if (kind == ElementKind.qr) {
+        value = await showQrTextDialog(context, 'https://example.com');
+      } else {
+        value = await askText('Текст', 'Новый текст');
+      }
       if (value == null || value.isEmpty || !mounted) return;
       element.text = value;
       if (kind == ElementKind.qr) {
@@ -1963,6 +1967,20 @@ class _ElementPanelState extends State<ElementPanel> {
               'на код и его свободную зону в 4 модуля: сканирование может не работать.',
               style: TextStyle(color: StudioColors.accent, fontSize: 12),
             ),
+          ),
+        if (element.kind == ElementKind.qr)
+          TextButton.icon(
+            icon: const Icon(Icons.link),
+            label: const Text('Изменить QR / сократить ссылку'),
+            onPressed: widget.enabled
+                ? () async {
+                    final value = await showQrTextDialog(context, element.text);
+                    if (!mounted || value == null || value.isEmpty) return;
+                    text.text = value;
+                    element.text = value;
+                    widget.onImageChanged();
+                  }
+                : null,
           ),
         control(
           'Ширина',
