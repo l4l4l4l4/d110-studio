@@ -6,8 +6,39 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:d110_studio/label.dart';
 import 'package:d110_studio/qr_calibration.dart';
 import 'package:d110_studio/printer.dart';
+import 'package:d110_studio/media_geometry.dart';
 
 void main() {
+  test(
+    'QR plan excludes rounded and offset head margins including quiet zones',
+    () async {
+      final media = MediaProfile(
+        lengthMm: 10,
+        widthMm: 9,
+        radiusMm: 3,
+        feedOffsetDots: 5,
+        headOffsetDots: 8,
+      );
+      final plan = qrCalibrationPlan(media: media);
+      expect(plan, isNotEmpty);
+      expect(plan.length, lessThan(15));
+      for (final sample in plan) {
+        final document = await sample.document(media: media);
+        try {
+          final qr = document.elements.first;
+          final bounds = Rect.fromLTWH(qr.x, qr.y, qr.width, qr.height);
+          expect(media.safeRect.contains(bounds.topLeft), isTrue);
+          expect(bounds.right, lessThanOrEqualTo(media.safeRect.right));
+          expect(bounds.bottom, lessThanOrEqualTo(media.safeRect.bottom));
+          expect(document.media.toJson(), media.toJson());
+        } finally {
+          document.dispose();
+        }
+      }
+      expect(qrCalibrationPlan(media: MediaProfile(widthMm: 1)), isEmpty);
+    },
+  );
+
   testWidgets(
     'scan reports require acknowledgement and uncertain prints never replay',
     (tester) async {
@@ -34,7 +65,8 @@ void main() {
           home: Scaffold(
             body: Builder(
               builder: (context) => TextButton(
-                onPressed: () => showQrCalibration(context, printer),
+                onPressed: () =>
+                    showQrCalibration(context, printer, media: MediaProfile()),
                 child: const Text('Open calibration'),
               ),
             ),
@@ -58,6 +90,10 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Копировать отчёт'));
       await tester.pumpAndSettle();
+      expect(
+        (jsonDecode(copied!) as Map)['mediaProfile'],
+        MediaProfile().toJson(),
+      );
       expect((jsonDecode(copied!) as Map)['observations'], [
         allOf(containsPair('id', 'Q1'), containsPair('scan', '3/3_exact')),
       ]);
@@ -94,19 +130,19 @@ void main() {
   testWidgets('calibration samples preserve integer modules and quiet zones', (
     tester,
   ) async {
-    final samples = qrCalibrationPlan();
+    final samples = qrCalibrationPlan(media: MediaProfile());
     expect(
       samples.map((s) => '${s.payload}/${s.pitch}/${s.density}').toSet().length,
       15,
     );
     await tester.runAsync(() async {
       for (final sample in samples) {
-        final document = await sample.document();
+        final document = await sample.document(media: MediaProfile());
         try {
           final qr = document.elements.first;
           final modules = qr.qr!.moduleCount;
           expect((qr.width / (modules + 8)).floor(), sample.pitch);
-          expect(qr.height, lessThanOrEqualTo(LabelDocument.height));
+          expect(qr.height, lessThanOrEqualTo(LabelDocument.printHeadDots));
           final image = await renderDesign(document);
           try {
             final data = await image.toByteData(

@@ -26,6 +26,7 @@ void main() {
           LabelElement(kind: ElementKind.text, text: 'Previous', x: 16, y: 30),
         ],
       );
+      old.media = old.media.copyWith(measuredAt: DateTime.utc(2026, 10, 23));
       var history = jsonEncode({'version': 1, 'document': old.toJson()});
       old.dispose();
       final originalHistory = history;

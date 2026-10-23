@@ -7,6 +7,8 @@ import 'package:qr/qr.dart';
 import 'raster.dart';
 import 'fonts.dart';
 import 'image_decode.dart';
+import 'media_geometry.dart' as geometry;
+import 'media_geometry.dart' show MediaProfile;
 
 enum ElementKind { text, qr, image }
 
@@ -180,60 +182,130 @@ class LabelElement {
 class LabelDocument {
   LabelDocument({
     this.name = 'Моя этикетка',
-    this.lengthMm = 30,
-    this.rows = 1,
-    this.columns = 1,
+    num lengthMm = 30,
+    MediaProfile? media,
+    int rows = 1,
+    int columns = 1,
     List<LabelElement>? elements,
-  }) : elements = elements ?? [] {
-    if (rows < 1 || rows > 8 || columns < 1 || columns > 8) {
-      throw ArgumentError('Сетка должна быть от 1×1 до 8×8');
-    }
+  }) : _media = media ?? MediaProfile(lengthMm: lengthMm.toDouble()),
+       _rows = rows,
+       _columns = columns,
+       elements = elements ?? [] {
+    _validateLayout(_media, rows, columns);
   }
   String name;
-  int lengthMm, rows, columns;
-  final List<LabelElement> elements;
-  int get tileWidth => lengthMm * 8;
-  int get width => tileWidth * columns;
-  int get canvasHeight => height * rows;
-  int get tileCount => rows * columns;
+  MediaProfile _media;
+  int _rows, _columns;
+  static const int maxCanvasPixels = geometry.maxMediaCanvasPixels;
   static const double maxElementWidth = 9600;
+  static const double maxElementHeight = 9600;
+
+  static bool fitsLayout(MediaProfile media, int rows, int columns) =>
+      rows >= 1 &&
+      rows <= 8 &&
+      columns >= 1 &&
+      columns <= 8 &&
+      media.rasterRows * media.paperHeightDots * rows * columns <=
+          maxCanvasPixels;
+
+  static void _validateLayout(MediaProfile media, int rows, int columns) {
+    if (!fitsLayout(media, rows, columns)) {
+      throw ArgumentError(
+        'Сетка должна быть от 1×1 до 8×8, макет — не больше 16 Мпикс.',
+      );
+    }
+  }
+
+  MediaProfile get media => _media;
+  set media(MediaProfile value) {
+    _validateLayout(value, _rows, _columns);
+    _media = value;
+  }
+
+  double get lengthMm => media.lengthMm;
+  set lengthMm(num value) {
+    if (value != media.lengthMm) {
+      media = media.copyWith(lengthMm: value.toDouble());
+    }
+  }
+
+  int get rows => _rows;
+  set rows(int value) {
+    _validateLayout(_media, value, _columns);
+    _rows = value;
+  }
+
+  int get columns => _columns;
+  set columns(int value) {
+    _validateLayout(_media, _rows, value);
+    _columns = value;
+  }
+
+  final List<LabelElement> elements;
+  int get tileWidth => media.rasterRows;
+  int get tileHeight => media.paperHeightDots;
+  int get width => tileWidth * columns;
+  int get canvasHeight => tileHeight * rows;
+  int get tileCount => rows * columns;
 
   Rect tileRect(int index) {
     RangeError.checkValueInInterval(index, 0, tileCount - 1, 'index');
     return Rect.fromLTWH(
       (index % columns * tileWidth).toDouble(),
-      (index ~/ columns * height).toDouble(),
+      (index ~/ columns * tileHeight).toDouble(),
       tileWidth.toDouble(),
-      height.toDouble(),
+      tileHeight.toDouble(),
     );
   }
 
-  static const int height = 96;
+  static const int printHeadDots = geometry.printHeadDots;
+
+  Path get paperPath {
+    final path = Path();
+    final tile = media.paperPath;
+    for (var i = 0; i < tileCount; i++) {
+      path.addPath(tile, tileRect(i).topLeft);
+    }
+    return path;
+  }
+
+  Path get printablePath {
+    final path = Path();
+    final tile = media.printablePath;
+    for (var i = 0; i < tileCount; i++) {
+      path.addPath(tile, tileRect(i).topLeft);
+    }
+    return path;
+  }
+
   Map<String, dynamic> toJson() => {
-    'version': 2,
+    'version': 3,
     'name': name,
-    'lengthMm': lengthMm,
+    'media': media.toJson(),
     'rows': rows,
     'columns': columns,
     'elements': elements.map((e) => e.toJson()).toList(),
   };
   factory LabelDocument.fromJson(Map<String, dynamic> json) {
-    if (json['version'] != 1 && json['version'] != 2) {
+    if (json['version'] != 1 && json['version'] != 2 && json['version'] != 3) {
       throw const FormatException('Неизвестная версия шаблона');
     }
-    final length = json['lengthMm'] as int;
-    if (length < 10 || length > 150) {
+    final MediaProfile media;
+    try {
+      media = json['version'] == 3
+          ? MediaProfile.fromJson(
+              Map<String, dynamic>.from(json['media'] as Map),
+            )
+          : MediaProfile(lengthMm: (json['lengthMm'] as num).toDouble());
+    } catch (_) {
       throw const FormatException('Некорректный размер этикетки');
     }
     final rows = json['version'] == 1 ? 1 : json['rows'];
     final columns = json['version'] == 1 ? 1 : json['columns'];
-    if (rows is! int ||
-        columns is! int ||
-        rows < 1 ||
-        rows > 8 ||
-        columns < 1 ||
-        columns > 8) {
-      throw const FormatException('Некорректная сетка этикеток');
+    if (rows is! int || columns is! int || !fitsLayout(media, rows, columns)) {
+      throw const FormatException(
+        'Некорректная или слишком большая сетка этикеток',
+      );
     }
     final items = json['elements'] as List;
     if (items.length > 100) {
@@ -241,7 +313,7 @@ class LabelDocument {
     }
     final document = LabelDocument(
       name: json['name'] as String,
-      lengthMm: length,
+      media: media,
       rows: rows,
       columns: columns,
       elements: items
@@ -264,7 +336,7 @@ class LabelDocument {
           e.width <= 0 ||
           e.height <= 0 ||
           e.width > maxElementWidth ||
-          e.height > 2400 ||
+          e.height > maxElementHeight ||
           e.fontSize < 1 ||
           e.fontSize > 300 ||
           e.textScaleX < minTextScale ||
@@ -285,6 +357,10 @@ class LabelDocument {
   }
 
   void dispose() {
+    _contentCache[this]?.picture.dispose();
+    _contentCache[this] = null;
+    _colorContentCache[this]?.picture.dispose();
+    _colorContentCache[this] = null;
     for (final e in elements) {
       e.dispose();
     }
@@ -312,26 +388,70 @@ void paintLabel(
   LabelDocument document, {
   bool colorImages = false,
 }) {
-  canvas.drawRect(
-    Rect.fromLTWH(
-      0,
-      0,
-      document.width.toDouble(),
-      document.canvasHeight.toDouble(),
-    ),
+  canvas.drawPath(
+    document.paperPath,
     Paint()
       ..color = Colors.white
       ..isAntiAlias = false,
   );
   canvas.save();
-  canvas.clipRect(
-    Rect.fromLTWH(
-      0,
-      0,
-      document.width.toDouble(),
-      document.canvasHeight.toDouble(),
+  canvas.clipPath(document.printablePath, doAntiAlias: false);
+  canvas.drawPicture(_contentPicture(document, colorImages: colorImages));
+  canvas.restore();
+}
+
+class _RecordedContent {
+  _RecordedContent(this.fingerprint, this.picture);
+  final int fingerprint;
+  final ui.Picture picture;
+}
+
+final _contentCache = Expando<_RecordedContent>();
+final _colorContentCache = Expando<_RecordedContent>();
+
+ui.Picture _contentPicture(LabelDocument document, {bool colorImages = false}) {
+  final cache = colorImages ? _colorContentCache : _contentCache;
+  final fingerprint = Object.hashAll(
+    document.elements.map(
+      (e) => Object.hashAll([
+        e.kind,
+        e.text,
+        e.x,
+        e.y,
+        e.width,
+        e.height,
+        e.rotation,
+        e.fontSize,
+        e.bold,
+        e.italic,
+        e.underline,
+        e.strikethrough,
+        e.fontFamily,
+        e.textResizeMode,
+        e.textScaleX,
+        e.textScaleY,
+        e.image,
+        e.colorImage,
+        e.qr,
+        e.inkOnly,
+      ]),
     ),
   );
+  final old = cache[document];
+  if (old != null && old.fingerprint == fingerprint) return old.picture;
+  final recorder = ui.PictureRecorder();
+  _paintContent(Canvas(recorder), document, colorImages: colorImages);
+  final picture = recorder.endRecording();
+  old?.picture.dispose();
+  cache[document] = _RecordedContent(fingerprint, picture);
+  return picture;
+}
+
+void _paintContent(
+  Canvas canvas,
+  LabelDocument document, {
+  bool colorImages = false,
+}) {
   final black = Paint()
     ..color = Colors.black
     ..isAntiAlias = false;
@@ -409,7 +529,6 @@ void paintLabel(
     }
     canvas.restore();
   }
-  canvas.restore();
 }
 
 Future<PrinterRaster> renderLabel(LabelDocument document) =>
@@ -419,10 +538,22 @@ Future<PrinterRaster> renderLabel(LabelDocument document) =>
 Future<PrinterRaster> renderTile(LabelDocument document, int index) async {
   final tile = document.tileRect(index);
   final recorder = ui.PictureRecorder();
-  final canvas = Canvas(recorder)..translate(-tile.left, -tile.top);
-  paintLabel(canvas, document);
+  final canvas = Canvas(recorder);
+  canvas.drawColor(Colors.white, BlendMode.src);
+  canvas.translate(
+    -tile.left - document.media.feedOffsetDots,
+    -tile.top - document.media.headOffsetDots,
+  );
+  canvas.clipPath(
+    document.media.printablePath.shift(tile.topLeft),
+    doAntiAlias: false,
+  );
+  canvas.drawPicture(_contentPicture(document));
   final picture = recorder.endRecording();
-  final image = await picture.toImage(document.tileWidth, LabelDocument.height);
+  final image = await picture.toImage(
+    document.tileWidth,
+    LabelDocument.printHeadDots,
+  );
   picture.dispose();
   final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
   image.dispose();
@@ -430,10 +561,14 @@ Future<PrinterRaster> renderTile(LabelDocument document, int index) async {
   final mono = monochromeRgba(
     bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
     document.tileWidth,
-    LabelDocument.height,
+    LabelDocument.printHeadDots,
     const RasterSettings(),
   );
-  return rotateForPrinter(mono, document.tileWidth, LabelDocument.height);
+  return rotateForPrinter(
+    mono,
+    document.tileWidth,
+    LabelDocument.printHeadDots,
+  );
 }
 
 /// Full, unrotated printable design for the live canvas.
@@ -460,6 +595,11 @@ Future<ui.Image> renderDesign(LabelDocument document) async {
 
 List<String> printWarnings(LabelDocument document) {
   final warnings = <String>[];
+  if (!document.media.isCalibrated) {
+    warnings.add(
+      'Размер и совмещение ленты не измерены: выполните физическую калибровку.',
+    );
+  }
   for (final e in document.elements) {
     if (e.width < 1 || e.height < 1) {
       warnings.add(
@@ -479,11 +619,21 @@ List<String> printWarnings(LabelDocument document) {
     final halfW = (e.width * c + e.height * s) / 2;
     final halfH = (e.width * s + e.height * c) / 2;
     final cx = e.x + e.width / 2, cy = e.y + e.height / 2;
-    if (cx - halfW < -0.01 ||
-        cy - halfH < -0.01 ||
-        cx + halfW > document.width + .01 ||
-        cy + halfH > document.canvasHeight + .01) {
-      warnings.add('Часть элемента выходит за край и будет обрезана.');
+    final bounds = Rect.fromLTRB(
+      cx - halfW,
+      cy - halfH,
+      cx + halfW,
+      cy + halfH,
+    );
+    final outside = Path.combine(
+      PathOperation.difference,
+      Path()..addRect(bounds),
+      document.printablePath,
+    );
+    if (!outside.getBounds().isEmpty) {
+      warnings.add(
+        'Часть элемента будет обрезана: край бумаги, скругления или непечатаемое поле головки.',
+      );
     }
   }
   return warnings.toSet().toList();

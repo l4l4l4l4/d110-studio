@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:d110_studio/drawing.dart';
 import 'package:d110_studio/label.dart';
+import 'package:d110_studio/media_geometry.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -33,6 +34,63 @@ Future<({int width, int height, Uint8List rgba})> decodePng(
 }
 
 void main() {
+  testWidgets(
+    'drawing masks rounded paper but exports recoverable corner ink',
+    (tester) async {
+      final drawing = DrawingDocument(
+        width: 160,
+        height: 112,
+        media: MediaProfile(
+          lengthMm: 10,
+          widthMm: 14,
+          radiusMm: 2,
+          headOffsetDots: 8,
+        ),
+        columns: 2,
+      );
+      addTearDown(drawing.dispose);
+      for (final point in [
+        const Offset(.5, .5),
+        const Offset(80.5, .5),
+        const Offset(40.5, 2.5),
+        const Offset(40.5, 50.5),
+      ]) {
+        drawing.beginStroke(1, point, 1);
+        drawing.endStroke(1);
+      }
+      await tester.runAsync(() async {
+        final source = await decodePng(await drawing.exportPng());
+        expect(source.rgba[3], 255);
+        expect(source.rgba[80 * 4 + 3], 255);
+        expect(source.rgba[(2 * 160 + 40) * 4 + 3], 255);
+        final recorder = ui.PictureRecorder();
+        drawing.paintPreview(Canvas(recorder));
+        final picture = recorder.endRecording();
+        final preview = await picture.toImage(160, 112);
+        picture.dispose();
+        final pixels = await preview.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
+        preview.dispose();
+        expect(pixels!.getUint8(3), 0);
+        expect(pixels.getUint8(80 * 4 + 3), 0);
+        expect(pixels.buffer.asUint8List((2 * 160 + 40) * 4, 4), [
+          255,
+          255,
+          255,
+          255,
+        ]);
+        expect(pixels.buffer.asUint8List((50 * 160 + 40) * 4, 4), [
+          0,
+          0,
+          0,
+          255,
+        ]);
+        expect((await decodePng(await drawing.exportPng())).rgba, source.rgba);
+      });
+    },
+  );
+
   testWidgets(
     'one-dot taps, jitter, paths and edge marks retain physical ink',
     (tester) async {
