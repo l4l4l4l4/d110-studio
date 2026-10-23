@@ -1,0 +1,20 @@
+{
+  "schema": "pohuy.ai-evidence/v1",
+  "covenant": "POHUY-COVENANT-1.0",
+  "submission_id": "d110-license-adoption",
+  "skill": {
+    "name": "pohuy",
+    "sha256": "813aacb4172223d0b857a4b1d9988efb0d58052c183b04dd6de56241bdb09de8"
+  },
+  "transcript": {
+    "sha256": "60ffa22fb9fa801737204e515612b7318b77d81a93d511c6836995a822204af9",
+    "capture_level": "relevant-message-excerpt"
+  },
+  "git": {
+    "code_tree": "32af2717d2ef737082429c16925018b816513b8a"
+  },
+  "canonical": {
+    "repository": "https://github.com/l4l4l4l4/POHUY-LICENSE",
+    "commit": "d3686738cf73236b84da93e0981d6e0f61b37747"
+  }
+}

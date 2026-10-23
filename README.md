@@ -160,4 +160,18 @@ recovery, drawing raster output and QR calibration geometry. These tests do
 not establish physical QR readability. Text-entry fields own their controllers
 until the dialog route is unmounted, not merely until `showDialog` completes.
 
-[MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)
+## License
+
+Project code is licensed under [ПО ХУЙ LICENSE](LICENSE), version 1.0.
+This is an **unapproved custom license**, not an OSI-approved open-source license.
+Contribution rules are separate: [POHUY-COVENANT-1.0](COVENANT.md).
+
+The license, covenant and required `pohuy` skill are pinned to
+[canonical commit d3686738cf73236b84da93e0981d6e0f61b37747](https://github.com/l4l4l4l4/POHUY-LICENSE/tree/d3686738cf73236b84da93e0981d6e0f61b37747).
+`skill.lock` records the canonical skill digest; contribution evidence belongs in
+`.pohuy-evidence/<submission-id>/`. The evidence checker verifies bundle structure
+and digests, not whether a client honestly captured every event.
+
+Bundled fonts retain SIL OFL-1.1 (licenses included in the app); dependencies retain
+their own licenses. Gothic/Bungee are Latin-only; international fallbacks are broad,
+not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)

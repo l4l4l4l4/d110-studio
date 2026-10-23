@@ -1,21 +1,12 @@
-MIT License
+ПО ХУЙ LICENSE
+ВЕРСИЯ 1.0
 
-Copyright (c) 2026 lalalala
+Короче. Это самодельная лицензия, не OSI-approved open source, и не притворяйся, что кто-то её одобрил. Статус: unapproved custom license.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Авторские права на проект — у тех, кто его написал. Чужое себе не приписывай.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Хуйня вопрос, что можно: юзать, копировать, менять, склеивать, публиковать, раздавать, сублицензировать и продавать копии. Одно условие, и оно не обсуждается: этот файл LICENSE лежит как есть. Переписал текст — ты уже не на этих условиях.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Даётся как есть. Гарантий нет. Наебнётся — это твои проблемы. Авторы не крайние и за ущерб не отвечают.
+
+Правила вклада — не эта бумажка. Их тут нет. Смотри COVENANT.md, идентификатор POHUY-COVENANT-1.0. Кто коммитит, какой скилл обязателен и какой чат прикладывать — там. Здесь только про то, можно ли пользоваться.
