@@ -49,4 +49,19 @@ unchanged. One-dot taps align to physical pixels. Full-grid ink retains its dot
 scale when saved, reopened or moved, including a 9600×768-dot composition.
 Secondary pointers and interrupted strokes do not commit new ink.
 
+## Physical QR calibration
+
+With a connected printer, the QR calibration action offers up to 15 separate
+30 mm test stickers across all three heat levels. Short-payload candidates
+use 1, 2 and 3 dots/module; realistic short-link candidates use 1 and 2.
+Every sample includes an integer module pitch, a four-module quiet zone and
+printed test metadata. Record the actual roll/media, scan each sample three
+times independently and mark 3/3 or failed, then copy the JSON report.
+
+**No maximum reliable QR density has been established yet.** A rendered QR
+or a successful printer acknowledgment is not a successful physical scan.
+Use the smallest consistently readable module pitch measured on the actual
+printer, media and heat setting; do not infer a universal default from one
+sample. The existing warning below two dots/module is not a calibration result.
+
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)

@@ -12,6 +12,7 @@ import 'image_picker.dart';
 import 'sticker_stack.dart';
 import 'printer_connection.dart';
 import 'drawing.dart';
+import 'qr_calibration.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -1133,6 +1134,13 @@ class _StudioPageState extends State<StudioPage>
                 : 'Шаблоны — в приложении',
             onPressed: native && !busy ? save : null,
             icon: const Icon(Icons.save_outlined),
+          ),
+          IconButton(
+            tooltip: 'Калибровка QR на принтере',
+            icon: const Icon(Icons.qr_code_scanner),
+            onPressed: native && printer.connected && !busy && !connection.busy
+                ? () => action(() => showQrCalibration(context, printer))
+                : null,
           ),
           IconButton(
             tooltip: preview
