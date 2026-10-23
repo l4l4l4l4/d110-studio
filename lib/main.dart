@@ -133,6 +133,7 @@ class _StudioPageState extends State<StudioPage>
       startTextScaleY = 1;
   _DragHandle? activeHandle, pointerHandle;
   Offset? pointerDown;
+  Rect? selectionBounds;
   double viewZoom = 1;
   Offset viewPan = Offset.zero;
   bool zoomingLabel = false;
@@ -652,19 +653,39 @@ class _StudioPageState extends State<StudioPage>
           )
           .clamp(.05, 12.0);
       final scale = fit * viewZoom;
+      // The gesture surface is the entire viewport, not the paper-sized square.
+      // A resized/rotated object's knobs can lie outside the physical label.
+      final viewportWidth = portrait
+          ? constraints.maxHeight
+          : constraints.maxWidth;
+      final viewportHeight = portrait
+          ? constraints.maxWidth
+          : constraints.maxHeight;
       final inset = Offset(
-        24 + (side - document.width) * scale / 2,
-        24 + (side - LabelDocument.height) * scale / 2,
+        (viewportWidth - document.width * scale) / 2,
+        (viewportHeight - LabelDocument.height * scale) / 2,
       );
       Offset labelPoint(Offset local) => (local - inset) / scale;
+      final pan = portrait ? Offset(viewPan.dy, -viewPan.dx) : viewPan;
+      final margin = math.min(
+        16.0,
+        math.min(viewportWidth, viewportHeight) / 2,
+      );
+      selectionBounds = Rect.fromPoints(
+        labelPoint(Offset(margin, margin) - pan),
+        labelPoint(
+          Offset(viewportWidth - margin, viewportHeight - margin) - pan,
+        ),
+      );
       return ClipRect(
         child: Center(
           child: Transform.translate(
             offset: viewPan,
             child: RotatedBox(
               quarterTurns: portrait ? 1 : 0,
-              child: SizedBox.square(
-                dimension: side * scale + 48,
+              child: SizedBox(
+                width: viewportWidth,
+                height: viewportHeight,
                 child: Listener(
                   key: const ValueKey('label-gesture'),
                   behavior: HitTestBehavior.opaque,
@@ -806,37 +827,46 @@ class _StudioPageState extends State<StudioPage>
                       zoomingLabel = false;
                       activeHandle = pointerHandle = null;
                     },
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(inset.dx, inset.dy, 24, 24),
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        fit: StackFit.expand,
-                        children: [
-                          RepaintBoundary(
-                            child: CustomPaint(
-                              painter: LabelPainter(
-                                document,
-                                scale,
-                                preview ? previewImage : null,
-                                revision,
-                              ),
-                            ),
-                          ),
-                          if (!preview && selected != null)
-                            IgnorePointer(
-                              child: RepaintBoundary(
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Positioned(
+                          left: inset.dx,
+                          top: inset.dy,
+                          width: document.width * scale,
+                          height: LabelDocument.height * scale,
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            fit: StackFit.expand,
+                            children: [
+                              RepaintBoundary(
                                 child: CustomPaint(
-                                  painter: SelectionPainter(
-                                    selected!,
+                                  painter: LabelPainter(
+                                    document,
                                     scale,
-                                    ants,
+                                    preview ? previewImage : null,
                                     revision,
                                   ),
                                 ),
                               ),
-                            ),
-                        ],
-                      ),
+                              if (!preview && selected != null)
+                                IgnorePointer(
+                                  child: RepaintBoundary(
+                                    child: CustomPaint(
+                                      painter: SelectionPainter(
+                                        selected!,
+                                        scale,
+                                        ants,
+                                        revision,
+                                        bounds: selectionBounds,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -851,24 +881,16 @@ class _StudioPageState extends State<StudioPage>
   _DragHandle? hitHandle(Offset point, double scale) {
     final element = selected;
     if (element == null) return null;
-    final delta =
-        point -
-        Offset(element.x + element.width / 2, element.y + element.height / 2);
-    final c = math.cos(element.rotation), s = math.sin(element.rotation);
-    final local = Offset(
-      delta.dx * c + delta.dy * s,
-      -delta.dx * s + delta.dy * c,
-    );
+    final knobs = _selectionKnobs(element, selectionBounds);
     final radiusSquared = 22 * 22 / (scale * scale);
-    if ((local - Offset(-element.width / 2, -element.height / 2))
-            .distanceSquared <=
-        radiusSquared) {
-      return _DragHandle.rotate;
-    }
-    if ((local - Offset(element.width / 2, element.height / 2))
-            .distanceSquared <=
-        radiusSquared) {
-      return _DragHandle.resize;
+    final rotateDistance = (point - knobs.rotate).distanceSquared;
+    final resizeDistance = (point - knobs.resize).distanceSquared;
+    // Small objects have overlapping 44px targets: use the closest knob,
+    // rather than letting the rotation target swallow the resize target.
+    if (math.min(rotateDistance, resizeDistance) <= radiusSquared) {
+      return resizeDistance < rotateDistance
+          ? _DragHandle.resize
+          : _DragHandle.rotate;
     }
     return null;
   }
@@ -1267,9 +1289,36 @@ class LabelPainter extends CustomPainter {
       oldDelegate.document != document;
 }
 
+({Offset rotate, Offset resize}) _selectionKnobs(
+  LabelElement element,
+  Rect? bounds,
+) {
+  final center = Offset(
+    element.x + element.width / 2,
+    element.y + element.height / 2,
+  );
+  final c = math.cos(element.rotation), s = math.sin(element.rotation);
+  final half = Offset(
+    element.width / 2 * c - element.height / 2 * s,
+    element.width / 2 * s + element.height / 2 * c,
+  );
+  Offset visible(Offset point) => bounds == null
+      ? point
+      : Offset(
+          point.dx.clamp(bounds.left, bounds.right),
+          point.dy.clamp(bounds.top, bounds.bottom),
+        );
+  return (rotate: visible(center - half), resize: visible(center + half));
+}
+
 class SelectionPainter extends CustomPainter {
-  SelectionPainter(this.element, this.scale, this.animation, this.revision)
-    : super(repaint: animation) {
+  SelectionPainter(
+    this.element,
+    this.scale,
+    this.animation,
+    this.revision, {
+    this.bounds,
+  }) : super(repaint: animation) {
     final width = element.width * scale, height = element.height * scale;
     final x = width / 2, y = height / 2;
     path = Path()..addRect(Rect.fromLTRB(-x, -y, x, y));
@@ -1291,26 +1340,28 @@ class SelectionPainter extends CustomPainter {
     right = Rect.fromLTWH(x - 1, -y - 1, 2, height + 2);
     rotateKnob = Offset(-x, -y);
     resizeKnob = Offset(x, y);
-    symbols = Path()
+    rotateSymbol = Path()
       ..addArc(
-        Rect.fromCircle(center: rotateKnob, radius: 5),
+        Rect.fromCircle(center: Offset.zero, radius: 5),
         -math.pi / 4,
         math.pi * 1.5,
       )
-      ..moveTo(-x + 4, -y + 1)
-      ..lineTo(-x + 4, -y - 4)
-      ..lineTo(-x - 1, -y - 4)
-      ..moveTo(x - 4, y - 4)
-      ..lineTo(x + 4, y + 4)
-      ..moveTo(x + 4, y - 1)
-      ..lineTo(x + 4, y + 4)
-      ..lineTo(x - 1, y + 4);
+      ..moveTo(4, 1)
+      ..lineTo(4, -4)
+      ..lineTo(-1, -4);
+    resizeSymbol = Path()
+      ..moveTo(-4, -4)
+      ..lineTo(4, 4)
+      ..moveTo(4, -1)
+      ..lineTo(4, 4)
+      ..lineTo(-1, 4);
   }
   final LabelElement element;
   final double scale;
   final Animation<double> animation;
   final int revision;
-  late final Path path, horizontal, vertical, symbols;
+  final Rect? bounds;
+  late final Path path, horizontal, vertical, rotateSymbol, resizeSymbol;
   late final Rect top, bottom, left, right;
   late final Offset rotateKnob, resizeKnob;
   final white = Paint()
@@ -1351,16 +1402,26 @@ class SelectionPainter extends CustomPainter {
     edge(canvas, right, vertical, resizeKnob.dx, phase);
     edge(canvas, bottom, horizontal, -phase, resizeKnob.dy);
     edge(canvas, left, vertical, rotateKnob.dx, -phase);
-    knob(canvas, rotateKnob);
-    knob(canvas, resizeKnob);
-    canvas.drawPath(symbols, black);
     canvas.restore();
+    final positions = _selectionKnobs(element, bounds);
+    void paintKnob(Offset position, Path symbol) {
+      canvas.save();
+      canvas.translate(position.dx * scale, position.dy * scale);
+      canvas.rotate(element.rotation);
+      knob(canvas, Offset.zero);
+      canvas.drawPath(symbol, black);
+      canvas.restore();
+    }
+
+    paintKnob(positions.rotate, rotateSymbol);
+    paintKnob(positions.resize, resizeSymbol);
   }
 
   @override
   bool shouldRepaint(covariant SelectionPainter oldDelegate) =>
       oldDelegate.element != element ||
       oldDelegate.scale != scale ||
+      oldDelegate.bounds != bounds ||
       oldDelegate.revision != revision;
 }
 

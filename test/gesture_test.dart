@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:d110_studio/label.dart';
 import 'package:d110_studio/main.dart';
@@ -34,18 +35,16 @@ Future<LabelPainter> openEditor(WidgetTester tester, Size viewport) async {
 /// Screen point of a label-space corner, taken from the rendered surface so
 /// portrait rotation and centering cannot drift from the widget.
 Offset rendered(RenderBox box, LabelPainter painter, Offset labelPoint) {
-  final side = painter.document.width > LabelDocument.height
-      ? painter.document.width.toDouble()
-      : LabelDocument.height.toDouble();
-  final local = Offset(
-    24 +
-        (side - painter.document.width) * painter.scale / 2 +
-        labelPoint.dx * painter.scale,
-    24 +
-        (side - LabelDocument.height) * painter.scale / 2 +
-        labelPoint.dy * painter.scale,
+  final paint = find.byWidgetPredicate(
+    (widget) =>
+        widget is CustomPaint &&
+        widget.painter is LabelPainter &&
+        (widget.painter! as LabelPainter).document == painter.document,
   );
-  return box.localToGlobal(local);
+  final paintBox = paint.evaluate().single.renderObject! as RenderBox;
+  final current =
+      (paint.evaluate().single.widget as CustomPaint).painter! as LabelPainter;
+  return paintBox.localToGlobal(labelPoint * current.scale);
 }
 
 void main() {
@@ -141,6 +140,89 @@ void main() {
       },
     );
   }
+
+  for (final angle in [0.0, .65]) {
+    testWidgets('repeated resize keeps current touch geometry at $angle', (
+      tester,
+    ) async {
+      var painter = await openEditor(tester, const Size(1000, 700));
+      final element = painter.document.elements.first;
+      element.rotation = angle;
+      final dynamic page = tester.state(find.byType(StudioPage));
+      page.changed();
+      await tester.pump();
+      for (var i = 0; i < 4; i++) {
+        painter =
+            tester.widget<CustomPaint>(labelPaint()).painter! as LabelPainter;
+        final box = tester.renderObject<RenderBox>(gestureSurface());
+        final center = Offset(
+          element.x + element.width / 2,
+          element.y + element.height / 2,
+        );
+        final corner =
+            center +
+            Offset(
+              element.width / 2 * math.cos(angle) -
+                  element.height / 2 * math.sin(angle),
+              element.width / 2 * math.sin(angle) +
+                  element.height / 2 * math.cos(angle),
+            );
+        final width = element.width;
+        final desired = rendered(box, painter, corner);
+        final viewport = tester.getRect(gestureSurface());
+        final visibleKnob = Offset(
+          desired.dx.clamp(viewport.left + 16, viewport.right - 16),
+          desired.dy.clamp(viewport.top + 16, viewport.bottom - 16),
+        );
+        final gesture = await tester.startGesture(
+          visibleKnob,
+          kind: ui.PointerDeviceKind.touch,
+        );
+        final delta = Offset(math.cos(angle), math.sin(angle)) * 34;
+        await gesture.moveBy(delta);
+        await gesture.moveBy(delta);
+        await gesture.up();
+        await tester.pump();
+        expect(element.width, greaterThan(width), reason: 'gesture $i');
+        expect(element.rotation, closeTo(angle, .0001));
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  testWidgets('tiny rotated object chooses the nearest overlapping knob', (
+    tester,
+  ) async {
+    var painter = await openEditor(tester, const Size(1000, 700));
+    final element = painter.document.elements.first;
+    element
+      ..width = 8
+      ..height = 5
+      ..rotation = .4;
+    final dynamic page = tester.state(find.byType(StudioPage));
+    page.changed();
+    await tester.pump();
+    painter = tester.widget<CustomPaint>(labelPaint()).painter! as LabelPainter;
+    final box = tester.renderObject<RenderBox>(gestureSurface());
+    final center = Offset(element.x + 4, element.y + 2.5);
+    final corner =
+        center +
+        Offset(
+          4 * math.cos(.4) - 2.5 * math.sin(.4),
+          4 * math.sin(.4) + 2.5 * math.cos(.4),
+        );
+    final gesture = await tester.startGesture(
+      rendered(box, painter, corner),
+      kind: ui.PointerDeviceKind.touch,
+    );
+    await gesture.moveBy(const Offset(30, 20));
+    await gesture.moveBy(const Offset(20, 10));
+    await gesture.up();
+    await tester.pump();
+    expect(element.width, greaterThan(8));
+    expect(element.rotation, closeTo(.4, .0001));
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('resize captures finger-down before the touch slop is crossed', (
     tester,
