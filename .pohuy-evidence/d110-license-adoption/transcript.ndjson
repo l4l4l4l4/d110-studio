@@ -1,0 +1,3 @@
+{"kind":"session_start","skill":"pohuy","communication":"pohuy-only"}
+{"kind":"human_message","content":"а, еще убери лицензию MIT и оставь только лицензию POHUY"}
+{"kind":"assistant_message","content":"В лицензионной ветке MIT заменён на каноническую **ПО ХУЙ LICENSE**, без отсебятины в юридическом тексте. Сторонние лицензии сохранены. Это custom license, не OSI-approved open source; ковенант и дайджест скилла закреплены на конкретном каноническом коммите. Пока не опубликовано."}
