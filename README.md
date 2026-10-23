@@ -18,4 +18,11 @@ viewport after resizing, rotation, zoom and pan. `make check` includes four
 consecutive text resizes at both zero and nonzero rotation, plus overlapping
 handles on a small rotated object.
 
+`Правка` keeps object settings beside the canvas on desktop and below it on
+narrow screens. The canvas remains visible and interactive while changing
+valid numeric values, text, size, rotation and image processing. For images,
+switch between the original color source and the actual monochrome print
+result; only the latter is printed. Inspector controls scroll independently
+of the canvas.
+
 [MIT license](LICENSE) · Bundled fonts: SIL OFL-1.1 (licenses included in the app). Gothic/Bungee are Latin-only; international fallbacks are broad, not universal. · [Protocol reference](https://github.com/0xMH/fichero-printer/blob/main/docs/PROTOCOL.md)

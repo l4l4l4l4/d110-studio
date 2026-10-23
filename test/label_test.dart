@@ -5,6 +5,56 @@ import 'package:d110_studio/label.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'live image settings rebuild printable pixels and retain color source',
+    () async {
+      final recorder = ui.PictureRecorder();
+      ui.Canvas(
+        recorder,
+      ).drawColor(const ui.Color(0xffff0000), ui.BlendMode.src);
+      final picture = recorder.endRecording();
+      final source = await picture.toImage(1, 1);
+      picture.dispose();
+      final png = await source.toByteData(format: ui.ImageByteFormat.png);
+      source.dispose();
+      final element = LabelElement(
+        kind: ElementKind.image,
+        imageBytes: png!.buffer.asUint8List(
+          png.offsetInBytes,
+          png.lengthInBytes,
+        ),
+        settings: const RasterSettings(
+          mode: RasterMode.threshold,
+          threshold: 128,
+        ),
+      );
+      try {
+        await element.prepare();
+        final original = element.colorImage;
+        final black = await element.image!.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
+        expect(black!.getUint8(0), 0);
+        element.settings = element.settings.copyWith(invert: true);
+        await element.prepare();
+        final white = await element.image!.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
+        expect(white!.getUint8(0), 255);
+        expect(element.colorImage, same(original));
+        final color = await element.colorImage!.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
+        expect(
+          color!.buffer.asUint8List(color.offsetInBytes, color.lengthInBytes),
+          [255, 0, 0, 255],
+        );
+      } finally {
+        element.dispose();
+      }
+    },
+  );
+
   test('translucent PNG is composited once before thresholding', () async {
     final recorder = ui.PictureRecorder();
     ui.Canvas(recorder).drawColor(const ui.Color(0x80c8c8c8), ui.BlendMode.src);
