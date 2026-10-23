@@ -10,6 +10,7 @@ import 'raster.dart';
 import 'fonts.dart';
 import 'image_picker.dart';
 import 'sticker_stack.dart';
+import 'printer_connection.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -101,7 +102,7 @@ class StudioPage extends StatefulWidget {
 }
 
 class _StudioPageState extends State<StudioPage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final printer = PrinterClient();
   LabelDocument document = LabelDocument(
     elements: [
@@ -117,7 +118,7 @@ class _StudioPageState extends State<StudioPage>
   );
   LabelElement? selected;
   List<Map<String, dynamic>> templates = [];
-  String connection = 'Принтер не подключён';
+  late final connection = PrinterConnectionController(printer);
   String? error;
   bool busy = false, preview = false;
   bool inspectorOpen = false, colorImages = false;
@@ -152,8 +153,22 @@ class _StudioPageState extends State<StudioPage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    connection.addListener(_connectionChanged);
     selected = document.elements.first;
     if (native) unawaited(_loadTemplates());
+    if (native) unawaited(connection.restore());
+  }
+
+  void _connectionChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (native && state == AppLifecycleState.resumed && !busy) {
+      unawaited(connection.restore());
+    }
   }
 
   Future<void> _loadTemplates() async {
@@ -172,11 +187,13 @@ class _StudioPageState extends State<StudioPage>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    connection.dispose();
     ants.dispose();
     previewTimer?.cancel();
     previewImage?.dispose();
     document.dispose();
-    unawaited(printer.disconnect());
+    printer.dispose();
     super.dispose();
   }
 
@@ -207,7 +224,7 @@ class _StudioPageState extends State<StudioPage>
   }
 
   Future<void> action(Future<void> Function() operation) async {
-    if (busy) return;
+    if (busy || connection.busy) return;
     setState(() {
       busy = true;
       error = null;
@@ -218,7 +235,6 @@ class _StudioPageState extends State<StudioPage>
       if (mounted) {
         setState(() {
           error = '$e';
-          if (!printer.connected) connection = 'Принтер не подключён';
         });
       }
     } finally {
@@ -309,9 +325,16 @@ class _StudioPageState extends State<StudioPage>
     changed();
   });
   Future<void> connect() => action(() async {
+    if (connection.phase == PrinterConnectionPhase.permissionRequired) {
+      await connection.enableAndReconnect();
+      if (!mounted ||
+          connection.phase != PrinterConnectionPhase.selectPrinter) {
+        return;
+      }
+    }
     Future<void> discoveryFinished = Future.value();
     Future<List<PrinterDevice>> discover() {
-      final request = printer.devices();
+      final request = connection.discover();
       // The dialog displays search errors; cancellation still waits for the
       // native request to release the client's single-flight lock.
       discoveryFinished = request.then<void>(
@@ -327,11 +350,7 @@ class _StudioPageState extends State<StudioPage>
     );
     await discoveryFinished;
     if (address == null || !mounted) return;
-    await printer.connect(address);
-    final info = await printer.info();
-    if (mounted) {
-      setState(() => connection = '${info.model} · ${info.firmware}');
-    }
+    await connection.connect(address);
   });
   int density = 2;
   Future<void> print() => action(() async {
@@ -693,7 +712,9 @@ class _StudioPageState extends State<StudioPage>
             ),
             const Divider(height: 32),
             Text(
-              native ? connection : 'Bluetooth и печать — только в приложении.',
+              native
+                  ? connection.message
+                  : 'Bluetooth и печать — только в приложении.',
               style: const TextStyle(color: StudioColors.blue),
             ),
             const SizedBox(height: 12),
@@ -1101,7 +1122,8 @@ class _StudioPageState extends State<StudioPage>
             constraints: const BoxConstraints(maxWidth: 1120),
             child: Column(
               children: [
-                if (busy) const LinearProgressIndicator(minHeight: 2),
+                if (busy || connection.busy)
+                  const LinearProgressIndicator(minHeight: 2),
                 if (error != null)
                   Container(
                     color: StudioColors.surface,
@@ -1280,23 +1302,39 @@ class _StudioPageState extends State<StudioPage>
                     ],
                   ),
                 ),
+                if (native)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                    child: Text(
+                      connection.message,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: StudioColors.muted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
                   child: Row(
                     children: [
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: native && !busy
+                          onPressed: native && !busy && !connection.busy
                               ? (printer.connected
-                                    ? () => action(() async {
-                                        await printer.disconnect();
-                                        if (mounted) {
-                                          setState(
-                                            () => connection =
-                                                'Принтер не подключён',
-                                          );
-                                        }
-                                      })
+                                    ? () => action(printer.disconnect)
+                                    : (connection.phase ==
+                                              PrinterConnectionPhase
+                                                  .bluetoothOff ||
+                                          connection.phase ==
+                                              PrinterConnectionPhase
+                                                  .enableDeclined ||
+                                          connection.phase ==
+                                              PrinterConnectionPhase
+                                                  .awaitingSettings)
+                                    ? () =>
+                                          action(connection.enableAndReconnect)
                                     : connect)
                               : null,
                           icon: Icon(
@@ -1310,6 +1348,15 @@ class _StudioPageState extends State<StudioPage>
                                 ? 'В приложении'
                                 : printer.connected
                                 ? 'Отключить'
+                                : (connection.phase ==
+                                          PrinterConnectionPhase.bluetoothOff ||
+                                      connection.phase ==
+                                          PrinterConnectionPhase
+                                              .enableDeclined ||
+                                      connection.phase ==
+                                          PrinterConnectionPhase
+                                              .awaitingSettings)
+                                ? 'Включить Bluetooth'
                                 : 'Подключить',
                           ),
                         ),
@@ -1317,7 +1364,11 @@ class _StudioPageState extends State<StudioPage>
                       const SizedBox(width: 10),
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed: native && printer.connected && !busy
+                          onPressed:
+                              native &&
+                                  printer.connected &&
+                                  !busy &&
+                                  !connection.busy
                               ? print
                               : null,
                           icon: const Icon(Icons.print_outlined),
@@ -2316,8 +2367,15 @@ class DeviceDialog extends StatefulWidget {
 }
 
 class _DeviceDialogState extends State<DeviceDialog> {
-  late Future<List<PrinterDevice>> devices = loadDevices();
+  late Future<List<PrinterDevice>> devices;
   bool searching = true;
+
+  @override
+  void initState() {
+    super.initState();
+    // Discovery notifies the editor; do not start it during the overlay build.
+    devices = Future.microtask(loadDevices);
+  }
 
   Future<List<PrinterDevice>> loadDevices() async {
     try {

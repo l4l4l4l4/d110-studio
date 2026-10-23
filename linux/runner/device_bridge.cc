@@ -40,7 +40,9 @@ struct Request {
 };
 
 struct Reply {
-  enum Kind { kNull, kBytes, kText, kDevices } kind = kNull;
+  enum Kind { kNull, kBytes, kText, kDevices, kAdapter } kind = kNull;
+  bool available = false;
+  bool enabled = false;
   std::vector<uint8_t> bytes;
   std::string text;
   std::vector<std::pair<std::string, std::string>> devices;
@@ -71,6 +73,12 @@ void Respond(FlMethodCall* call, const Reply& reply) {
     g_autoptr(FlValue) value = nullptr;
     switch (reply.kind) {
       case Reply::kNull:
+        break;
+      case Reply::kAdapter:
+        value = fl_value_new_map();
+        fl_value_set_string_take(value, "available", fl_value_new_bool(reply.available));
+        fl_value_set_string_take(value, "enabled", fl_value_new_bool(reply.enabled));
+        fl_value_set_string_take(value, "permitted", fl_value_new_bool(true));
         break;
       case Reply::kBytes:
         value = fl_value_new_uint8_list(reply.bytes.data(), reply.bytes.size());
@@ -208,14 +216,18 @@ struct DeviceBridge::Impl {
       Call call;
       Reply reply;
       std::shared_ptr<std::atomic<bool>> alive;
+      FlMethodChannel* channel;
     };
-    auto* completion = new Completion{std::move(call), std::move(reply), alive};
+    auto* completion = new Completion{std::move(call), std::move(reply), alive, channel};
     // An idle source (rather than g_main_context_invoke) never executes replies
     // inline on the worker, even when the UI context is temporarily unowned.
     GSource* source = g_idle_source_new();
     g_source_set_callback(source, [](gpointer data) -> gboolean {
       auto* value = static_cast<Completion*>(data);
-      if (value->alive->load()) Respond(value->call.get(), value->reply);
+      if (value->alive->load()) {
+        if (value->call) Respond(value->call.get(), value->reply);
+        else fl_method_channel_invoke_method(value->channel, "disconnected", nullptr, nullptr, nullptr, nullptr);
+      }
       return G_SOURCE_REMOVE;
     }, completion, [](gpointer data) { delete static_cast<Completion*>(data); });
     g_source_attach(source, context);
@@ -236,7 +248,7 @@ struct DeviceBridge::Impl {
     request.method = fl_method_call_get_name(call);
     FlValue* args = fl_method_call_get_args(call);
     Reply error;
-    if (request.method == "connect") {
+    if (request.method == "connect" || request.method == "saveLastPrinterAddress") {
       FlValue* address = Argument(args, "address", FL_VALUE_TYPE_STRING);
       if (!address) {
         error.Error("invalid_argument", "connect requires an address string", EINVAL);
@@ -277,7 +289,9 @@ struct DeviceBridge::Impl {
     } else if (request.method == "pickImage") {
       PickImage(std::move(request.call));
       return;
-    } else if (request.method != "devices" && request.method != "disconnect" && request.method != "loadTemplates") {
+    } else if (request.method != "devices" && request.method != "disconnect" &&
+               request.method != "loadTemplates" && request.method != "lastPrinterAddress" &&
+               request.method != "adapterState" && request.method != "requestEnableBluetooth") {
       fl_method_call_respond_not_implemented(call, nullptr);
       return;
     }
@@ -326,6 +340,7 @@ struct DeviceBridge::Impl {
       shutdown(socket_fd, SHUT_RDWR);
       close(socket_fd);
       socket_fd = -1;
+      Complete(Call{}, Reply{});
     }
   }
 
@@ -352,7 +367,21 @@ struct DeviceBridge::Impl {
     }
   }
 
+  // Check only while idle; never consume protocol bytes or send heartbeat commands.
+  void CheckDisconnect() {
+    if (socket_fd < 0) return;
+    pollfd descriptor{socket_fd, POLLIN, 0};
+    if (poll(&descriptor, 1, 0) <= 0) return;
+    if (descriptor.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+      CloseSocket();
+    } else if (descriptor.revents & POLLIN) {
+      uint8_t byte;
+      if (recv(socket_fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT) == 0) CloseSocket();
+    }
+  }
+
   bool Connect(const std::string& address, Reply& reply) {
+    if (!RequireAdapter(reply)) return false;
     sockaddr_rc remote{};
     remote.rc_family = AF_BLUETOOTH;
     remote.rc_channel = 1;
@@ -424,7 +453,66 @@ struct DeviceBridge::Impl {
     }
   }
 
+  bool AdapterState(Reply& reply) {
+    g_autoptr(GError) error = nullptr;
+    g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, cancellable, &error);
+    if (!bus) return reply.Error("bluetooth_unavailable", "System Bluetooth service is unavailable", error->code);
+    g_autoptr(GVariant) result = g_dbus_connection_call_sync(bus, "org.bluez", "/",
+        "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", nullptr,
+        G_VARIANT_TYPE("(a{oa{sa{sv}}})"), G_DBUS_CALL_FLAGS_NONE, 5000, cancellable, &error);
+    if (!result) return reply.Error("bluetooth_unavailable", "BlueZ service is unavailable", error->code);
+    reply.kind = Reply::kAdapter;
+    g_autoptr(GVariant) objects = g_variant_get_child_value(result, 0);
+    GVariantIter iterator;
+    g_variant_iter_init(&iterator, objects);
+    const gchar* path;
+    GVariant* interfaces;
+    while (g_variant_iter_next(&iterator, "{&o@a{sa{sv}}}", &path, &interfaces)) {
+      GVariant* properties = g_variant_lookup_value(interfaces, "org.bluez.Adapter1", G_VARIANT_TYPE("a{sv}"));
+      if (properties) {
+        gboolean powered = FALSE;
+        reply.available = true;
+        g_variant_lookup(properties, "Powered", "b", &powered);
+        reply.enabled = reply.enabled || powered;
+        g_variant_unref(properties);
+      }
+      g_variant_unref(interfaces);
+    }
+    return true;
+  }
+
+  bool RequireAdapter(Reply& reply) {
+    Reply state;
+    if (!AdapterState(state)) { reply = std::move(state); return false; }
+    if (!state.available) return reply.Error("bluetooth_unavailable", "No Bluetooth adapter is available", ENODEV);
+    if (!state.enabled) return reply.Error("bluetooth_disabled", "Turn on Bluetooth in system settings", ENETDOWN);
+    return true;
+  }
+
+  bool RequestEnable(Reply& reply) {
+    Reply state;
+    if (!AdapterState(state)) { reply = std::move(state); return false; }
+    if (!state.available) return reply.Error("bluetooth_unavailable", "No Bluetooth adapter is available", ENODEV);
+    reply.kind = Reply::kText;
+    if (state.enabled) { reply.text = "enabled"; return true; }
+    // Launch a desktop control panel, never write BlueZ Powered or rfkill state.
+    const char* programs[] = {"blueman-manager", "gnome-control-center", "systemsettings"};
+    const char* panels[] = {nullptr, "bluetooth", "kcm_bluetooth"};
+    for (size_t index = 0; index < 3; ++index) {
+      g_autofree gchar* executable = g_find_program_in_path(programs[index]);
+      if (!executable) continue;
+      gchar* arguments[] = {executable, const_cast<gchar*>(panels[index]), nullptr};
+      g_autoptr(GError) error = nullptr;
+      if (g_spawn_async(nullptr, arguments, nullptr, G_SPAWN_DEFAULT, nullptr, nullptr, nullptr, &error)) {
+        reply.text = "settings_opened";
+        return true;
+      }
+    }
+    return reply.Error("settings_unavailable", "Open your desktop Bluetooth settings to enable Bluetooth", ENOENT);
+  }
+
   bool Devices(Reply& reply) {
+    if (!RequireAdapter(reply)) return false;
     g_autoptr(GError) error = nullptr;
     g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, cancellable, &error);
     if (!bus) return reply.Error("bluetooth_error", "Connecting to system D-Bus: " + std::string(error->message), error->code);
@@ -456,7 +544,7 @@ struct DeviceBridge::Impl {
     return true;
   }
 
-  bool SaveTemplates(const std::string& json, Reply& reply) {
+  bool SaveText(const std::string& filename, const std::string& json, Reply& reply) {
     if (g_mkdir_with_parents(template_directory.c_str(), 0700) != 0)
       return reply.Error("file_error", "Creating template directory: " + std::string(std::strerror(errno)), errno);
     std::string temporary = template_directory + "/.templates-XXXXXX";
@@ -478,7 +566,7 @@ struct DeviceBridge::Impl {
     }
     if (success && fsync(fd) != 0) success = reply.Error("file_error", "Flushing templates: " + std::string(std::strerror(errno)), errno);
     if (close(fd) != 0 && success) success = reply.Error("file_error", "Closing templates: " + std::string(std::strerror(errno)), errno);
-    if (success && rename(path.data(), (template_directory + "/templates.json").c_str()) != 0)
+    if (success && rename(path.data(), (template_directory + "/" + filename).c_str()) != 0)
       success = reply.Error("file_error", "Replacing templates: " + std::string(std::strerror(errno)), errno);
     if (!success) unlink(path.data());
     if (success) {
@@ -490,13 +578,34 @@ struct DeviceBridge::Impl {
     return success;
   }
 
+  bool LastPrinterAddress(Reply& reply) {
+    if (!ReadFile(template_directory + "/last-printer-address", false, true, reply)) return false;
+    if (reply.text == "[]") { reply = Reply{}; return true; }
+    bdaddr_t address;
+    if (reply.text.size() != 17 || str2ba(reply.text.c_str(), &address) != 0)
+      return reply.Error("storage_error", "Saved printer address is invalid", EINVAL);
+    return true;
+  }
+
+  bool SaveLastPrinterAddress(const std::string& address, Reply& reply) {
+    bdaddr_t parsed;
+    if (address.size() != 17 || str2ba(address.c_str(), &parsed) != 0)
+      return reply.Error("invalid_address", "Invalid Bluetooth address", EINVAL);
+    return SaveText("last-printer-address", address, reply);
+  }
+
   void Run() {
     for (;;) {
       Request request;
       {
         std::unique_lock<std::mutex> lock(queue_mutex);
-        ready.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+        if (socket_fd >= 0) {
+          ready.wait_for(lock, std::chrono::milliseconds(500), [this] { return stopping.load() || !queue.empty(); });
+        } else {
+          ready.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+        }
         if (stopping.load()) break;
+        if (queue.empty()) { lock.unlock(); CheckDisconnect(); continue; }
         request = std::move(queue.front());
         queue.pop_front();
       }
@@ -509,7 +618,11 @@ struct DeviceBridge::Impl {
       else if (request.method == "exchange") success = Exchange(request, reply);
       else if (request.method == "pickImage") success = ReadFile(request.path, true, false, reply);
       else if (request.method == "loadTemplates") success = ReadFile(template_directory + "/templates.json", false, true, reply);
-      else if (request.method == "saveTemplates") success = SaveTemplates(request.text, reply);
+      else if (request.method == "saveTemplates") success = SaveText("templates.json", request.text, reply);
+      else if (request.method == "lastPrinterAddress") success = LastPrinterAddress(reply);
+      else if (request.method == "saveLastPrinterAddress") success = SaveLastPrinterAddress(request.text, reply);
+      else if (request.method == "adapterState") success = AdapterState(reply);
+      else if (request.method == "requestEnableBluetooth") success = RequestEnable(reply);
       if (!success && (request.method == "connect" || request.method == "write" || request.method == "exchange")) CloseSocket();
       Complete(std::move(request.call), std::move(reply));
     }

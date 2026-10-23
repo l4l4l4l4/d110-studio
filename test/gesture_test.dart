@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:d110_studio/label.dart';
 import 'package:d110_studio/main.dart';
+import 'package:d110_studio/printer_connection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -49,6 +50,96 @@ Offset rendered(RenderBox box, LabelPainter painter, Offset labelPoint) {
 }
 
 void main() {
+  testWidgets('manual printer selection survives connection-state updates', (
+    tester,
+  ) async {
+    await openEditor(tester, const Size(420, 900));
+    const channel = MethodChannel('d110_studio/device');
+    const address = 'AA:BB:CC:DD:EE:01';
+    String? saved;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      switch (call.method) {
+        case 'adapterState':
+          return {'available': true, 'enabled': true, 'permitted': true};
+        case 'devices':
+          return [
+            {'name': 'D110', 'address': address, 'paired': true},
+          ];
+        case 'exchange':
+          return Uint8List.fromList('D110'.codeUnits);
+        case 'saveLastPrinterAddress':
+          saved = (call.arguments as Map)['address'] as String;
+          return null;
+        default:
+          return null;
+      }
+    });
+    final dynamic page = tester.state(find.byType(StudioPage));
+    final connection = page.connection as PrinterConnectionController;
+    unawaited(connection.restore());
+    await tester.pump();
+    final operation = page.connect() as Future<void>;
+    try {
+      await tester.pump();
+      await tester.pump();
+      final device = find.widgetWithText(ListTile, 'D110');
+      expect(device, findsOneWidget);
+      await tester.tap(device);
+      await tester.pump(const Duration(milliseconds: 300));
+      await operation;
+      expect(connection.phase, PrinterConnectionPhase.connected);
+      expect(saved, address);
+    } finally {
+      final picker = find.byType(DeviceDialog);
+      if (picker.evaluate().isNotEmpty) {
+        Navigator.of(tester.element(picker)).pop();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+      await operation;
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  testWidgets('first-use enable refusal never opens a Bluetooth error picker', (
+    tester,
+  ) async {
+    await openEditor(tester, const Size(420, 900));
+    const channel = MethodChannel('d110_studio/device');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'adapterState') {
+        return {'available': true, 'enabled': null, 'permitted': false};
+      }
+      if (call.method == 'requestEnableBluetooth') return 'declined';
+      if (call.method == 'devices') {
+        throw PlatformException(code: 'bluetooth_disabled');
+      }
+      return null;
+    });
+    final dynamic page = tester.state(find.byType(StudioPage));
+    final connection = page.connection as PrinterConnectionController;
+    unawaited(connection.restore());
+    await tester.pump();
+    expect(connection.phase, PrinterConnectionPhase.permissionRequired);
+    final operation = page.connect() as Future<void>;
+    try {
+      await tester.pump();
+      expect(find.byType(DeviceDialog), findsNothing);
+      expect(connection.phase, PrinterConnectionPhase.enableDeclined);
+    } finally {
+      final picker = find.byType(DeviceDialog);
+      if (picker.evaluate().isNotEmpty) {
+        Navigator.of(tester.element(picker)).pop();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+      await operation;
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
   testWidgets('moving full-grid artwork does not resize its physical dots', (
     tester,
   ) async {
