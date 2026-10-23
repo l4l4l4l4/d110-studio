@@ -49,6 +49,63 @@ Offset rendered(RenderBox box, LabelPainter painter, Offset labelPoint) {
 }
 
 void main() {
+  testWidgets('saving text survives dialog dismissal and keeps its payload', (
+    tester,
+  ) async {
+    final painter = await openEditor(tester, const Size(1000, 700));
+    await tester.tap(find.text('Текст'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(find.byType(TextField), 'Saved label');
+    await tester.tap(find.text('Сохранить'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(painter.document.elements.last.text, 'Saved label');
+    await tester.tap(find.text('QR'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(find.byType(TextField), 'https://example.com/saved');
+    await tester.tap(find.text('Сохранить'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(painter.document.elements.last.kind, ElementKind.qr);
+    expect(painter.document.elements.last.text, 'https://example.com/saved');
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final dismiss in ['cancel', 'barrier']) {
+    testWidgets('$dismiss discards text and lets the next dialog save', (
+      tester,
+    ) async {
+      final painter = await openEditor(tester, const Size(1000, 700));
+      final original = List<LabelElement>.of(painter.document.elements);
+      await tester.tap(find.text('Текст'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.enterText(find.byType(TextField), 'Discarded label');
+      if (dismiss == 'cancel') {
+        await tester.tap(find.text('Отмена'));
+      } else {
+        await tester.tapAt(const Offset(10, 10));
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(painter.document.elements, orderedEquals(original));
+      await tester.tap(find.text('Текст'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Новый текст',
+      );
+      await tester.tap(find.text('Сохранить'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(painter.document.elements.last.text, 'Новый текст');
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   for (final portrait in [true, false]) {
     testWidgets(
       'resize handle accepts its visible outside-paper half in ${portrait ? 'portrait' : 'landscape'}',
