@@ -613,9 +613,28 @@ struct DeviceBridge::Impl {
       std::string address = Address(device.Address.ullLong);
       std::string name = Utf8(device.szName);
       if (name.empty()) name = address;
-      devices.emplace_back();
-      devices.back() = flutter::EncodableMap{
-          {Value("name"), Value(name)}, {Value("address"), Value(address)}};
+      // Enabled Windows services provide positive evidence only: a disabled
+      // SPP service does not prove that the remote device lacks RFCOMM.
+      static constexpr GUID spp_uuid{
+          0x00001101, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb}};
+      GUID services[64]{};
+      DWORD count = static_cast<DWORD>(std::size(services));
+      const DWORD service_status =
+          BluetoothEnumerateInstalledServices(nullptr, &device, &count, services);
+      Value spp;
+      if (service_status == ERROR_SUCCESS || service_status == ERROR_MORE_DATA) {
+        for (DWORD index = 0; index < std::min(count, static_cast<DWORD>(std::size(services))); ++index) {
+          if (IsEqualGUID(services[index], spp_uuid)) {
+            spp = Value(true);
+            break;
+          }
+        }
+      }
+      devices.emplace_back(flutter::EncodableMap{
+          {Value("name"), Value(std::move(name))},
+          {Value("address"), Value(std::move(address))},
+          {Value("classic"), Value(true)},
+          {Value("spp"), std::move(spp)}});
       device = {};
       device.dwSize = sizeof(device);
       if (!BluetoothFindNextDevice(find, &device)) {

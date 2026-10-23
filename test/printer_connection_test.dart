@@ -259,7 +259,12 @@ void main() {
     messenger.setMockMethodCallHandler(channel, (call) async {
       if (call.method == 'devices') {
         return [
-          {'name': 'D110', 'address': goodAddress, 'paired': true},
+          {
+            'name': 'D110',
+            'address': goodAddress,
+            'classic': true,
+            'spp': true,
+          },
         ];
       }
       return null;

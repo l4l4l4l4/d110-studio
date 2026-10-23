@@ -40,13 +40,22 @@ struct Request {
   int timeout = 3000;
 };
 
+enum class Capability { kUnknown, kNo, kYes };
+
+struct DiscoveredDevice {
+  std::string name;
+  std::string address;
+  Capability classic = Capability::kUnknown;
+  Capability spp = Capability::kUnknown;
+};
+
 struct Reply {
   enum Kind { kNull, kBytes, kText, kDevices, kAdapter } kind = kNull;
   bool available = false;
   bool enabled = false;
   std::vector<uint8_t> bytes;
   std::string text;
-  std::vector<std::pair<std::string, std::string>> devices;
+  std::vector<DiscoveredDevice> devices;
   std::string code;
   std::string message;
   int os_error = 0;
@@ -62,6 +71,12 @@ struct Reply {
                  " (errno " + std::to_string(number) + ")", number);
   }
 };
+
+FlValue* CapabilityValue(Capability capability) {
+  return capability == Capability::kUnknown
+      ? fl_value_new_null()
+      : fl_value_new_bool(capability == Capability::kYes);
+}
 
 void Respond(FlMethodCall* call, const Reply& reply) {
   g_autoptr(GError) error = nullptr;
@@ -91,8 +106,10 @@ void Respond(FlMethodCall* call, const Reply& reply) {
         value = fl_value_new_list();
         for (const auto& device : reply.devices) {
           FlValue* entry = fl_value_new_map();
-          fl_value_set_string_take(entry, "name", fl_value_new_string(device.first.c_str()));
-          fl_value_set_string_take(entry, "address", fl_value_new_string(device.second.c_str()));
+          fl_value_set_string_take(entry, "name", fl_value_new_string(device.name.c_str()));
+          fl_value_set_string_take(entry, "address", fl_value_new_string(device.address.c_str()));
+          fl_value_set_string_take(entry, "classic", CapabilityValue(device.classic));
+          fl_value_set_string_take(entry, "spp", CapabilityValue(device.spp));
           fl_value_append_take(value, entry);
         }
         break;
@@ -562,13 +579,46 @@ struct DeviceBridge::Impl {
         g_variant_lookup(properties, "Address", "&s", &address);
         g_variant_lookup(properties, "Alias", "&s", &name);
         if (!name) g_variant_lookup(properties, "Name", "&s", &name);
-        if (address && std::none_of(reply.devices.begin(), reply.devices.end(), [address](const auto& entry) { return entry.second == address; }))
-          reply.devices.emplace_back(name ? name : address, address);
+        if (address && std::none_of(reply.devices.begin(), reply.devices.end(),
+            [address](const auto& entry) { return entry.address == address; })) {
+          Capability classic = Capability::kUnknown;
+          Capability spp = Capability::kUnknown;
+          guint32 device_class = 0;
+          const gchar* address_type = nullptr;
+          if (g_variant_lookup(properties, "Class", "u", &device_class)) {
+            classic = Capability::kYes;
+          } else if (g_variant_lookup(properties, "AddressType", "&s", &address_type) &&
+                     std::strcmp(address_type, "random") == 0) {
+            classic = Capability::kNo;
+          }
+          g_autoptr(GVariant) services = g_variant_lookup_value(
+              properties, "UUIDs", G_VARIANT_TYPE("as"));
+          if (services) {
+            GVariantIter service_iterator;
+            g_variant_iter_init(&service_iterator, services);
+            const gchar* uuid;
+            while (g_variant_iter_next(&service_iterator, "&s", &uuid)) {
+              if (g_ascii_strcasecmp(uuid, "00001101-0000-1000-8000-00805f9b34fb") == 0) {
+                spp = Capability::kYes;
+                classic = Capability::kYes;
+                break;
+              }
+            }
+            gboolean resolved = false;
+            if (spp != Capability::kYes && g_variant_n_children(services) > 0 &&
+                g_variant_lookup(properties, "ServicesResolved", "b", &resolved) && resolved) {
+              spp = Capability::kNo;
+            }
+          }
+          reply.devices.push_back({name ? name : address, address, classic, spp});
+        }
         g_variant_unref(properties);
       }
       g_variant_unref(interfaces);
     }
-    std::sort(reply.devices.begin(), reply.devices.end());
+    std::sort(reply.devices.begin(), reply.devices.end(), [](const auto& left, const auto& right) {
+      return left.name < right.name || (left.name == right.name && left.address < right.address);
+    });
     return true;
   }
 
