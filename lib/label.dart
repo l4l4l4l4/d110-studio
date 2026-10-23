@@ -46,6 +46,7 @@ class LabelElement {
   Uint8List? imageBytes;
   RasterSettings settings;
   ui.Image? image;
+  ui.Image? colorImage;
   QrImage? qr;
   Uint8List? _sourceRgba;
   int _sourceWidth = 0, _sourceHeight = 0, _generation = 0;
@@ -127,6 +128,9 @@ class LabelElement {
           if (rgba == null) {
             throw StateError('Не удалось прочитать изображение');
           }
+          if (_disposed || generation != _generation) return;
+          colorImage?.dispose();
+          colorImage = decoded.image.clone();
           _imageSourceWidth = decoded.sourceWidth;
           _imageSourceHeight = decoded.sourceHeight;
           _sourceWidth = decoded.image.width;
@@ -160,6 +164,7 @@ class LabelElement {
     _disposed = true;
     ++_generation;
     image?.dispose();
+    colorImage?.dispose();
     _sourceRgba = null;
   }
 }
@@ -259,7 +264,11 @@ Future<ui.Image> rgbaImage(Uint8List rgba, int width, int height) async {
   return frame.image;
 }
 
-void paintLabel(Canvas canvas, LabelDocument document) {
+void paintLabel(
+  Canvas canvas,
+  LabelDocument document, {
+  bool colorImages = false,
+}) {
   canvas.drawRect(
     Rect.fromLTWH(
       0,
@@ -344,7 +353,7 @@ void paintLabel(Canvas canvas, LabelDocument document) {
         }
       }
     } else if (e.image != null) {
-      final image = e.image!;
+      final image = colorImages ? (e.colorImage ?? e.image!) : e.image!;
       canvas.drawImageRect(
         image,
         Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),

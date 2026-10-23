@@ -141,6 +141,46 @@ void main() {
     );
   }
 
+  for (final viewport in [const Size(420, 900), const Size(1200, 800)]) {
+    testWidgets('persistent inspector keeps canvas live at $viewport', (
+      tester,
+    ) async {
+      final painter = await openEditor(tester, viewport);
+      await tester.tap(find.text('Правка'));
+      await tester.pump();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.byKey(const ValueKey('live-inspector')), findsOneWidget);
+      expect(tester.getSize(gestureSurface()).shortestSide, greaterThan(100));
+      await tester.enterText(find.byType(TextField).first, 'Live text');
+      await tester.pump();
+      expect(painter.document.elements.first.text, 'Live text');
+      if (viewport.width == 420) {
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        addTearDown(tester.view.resetViewInsets);
+        await tester.pump();
+        expect(tester.getSize(gestureSurface()).shortestSide, greaterThan(60));
+        expect(tester.takeException(), isNull);
+        tester.view.resetViewInsets();
+        await tester.pump();
+      }
+      final dynamic page = tester.state(find.byType(StudioPage));
+      final second = LabelElement(kind: ElementKind.text, text: 'Second');
+      painter.document.elements.add(second);
+      page.selected = second;
+      page.changed();
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(find.byType(TextField).first).controller!.text,
+        'Second',
+      );
+      page.deleteSelected();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('live-inspector')), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   for (final angle in [0.0, .65]) {
     testWidgets('repeated resize keeps current touch geometry at $angle', (
       tester,

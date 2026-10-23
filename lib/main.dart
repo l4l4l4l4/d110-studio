@@ -119,6 +119,7 @@ class _StudioPageState extends State<StudioPage>
   String connection = 'Принтер не подключён';
   String? error;
   bool busy = false, preview = false;
+  bool inspectorOpen = false, colorImages = false;
   ui.Image? previewImage;
   Timer? previewTimer;
   int previewVersion = 0;
@@ -456,7 +457,8 @@ class _StudioPageState extends State<StudioPage>
     if (element == null || busy) return;
     document.elements.remove(element);
     element.dispose();
-    selected = document.elements.lastOrNull;
+    selected = null;
+    inspectorOpen = false;
     changed();
   }
 
@@ -496,24 +498,105 @@ class _StudioPageState extends State<StudioPage>
       );
 
   void editSelected() {
-    final element = selected;
-    if (element == null || busy) return;
-    unawaited(
-      sheet(
-        elementName(element),
-        (context) => ElementPanel(
-          element: element,
-          enabled: !busy,
-          onChanged: changed,
-          onImageChanged: () => unawaited(prepareElement(element)),
-          onDelete: () {
-            Navigator.pop(context);
-            deleteSelected();
-          },
-        ),
-      ),
-    );
+    if (selected == null || busy) return;
+    setState(() {
+      preview = false;
+      inspectorOpen = true;
+    });
   }
+
+  Widget editorWorkspace() => LayoutBuilder(
+    builder: (context, constraints) {
+      final element = selected;
+      if (!inspectorOpen || element == null) return canvas();
+      final inspector = Container(
+        key: const ValueKey('live-inspector'),
+        decoration: const BoxDecoration(
+          color: StudioColors.surface,
+          border: Border(
+            left: BorderSide(color: StudioColors.border),
+            top: BorderSide(color: StudioColors.border),
+          ),
+        ),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                const SizedBox(width: 16),
+                Icon(elementIcon(element), color: StudioColors.accent),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    elementName(element),
+                    style: const TextStyle(color: StudioColors.accent),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Закрыть настройки',
+                  onPressed: () {
+                    FocusManager.instance.primaryFocus?.unfocus();
+                    setState(() => inspectorOpen = false);
+                  },
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                child: Column(
+                  children: [
+                    if (element.kind == ElementKind.image) ...[
+                      SegmentedButton<bool>(
+                        segments: const [
+                          ButtonSegment(
+                            value: false,
+                            label: Text('Ч/б · печать'),
+                          ),
+                          ButtonSegment(value: true, label: Text('Оригинал')),
+                        ],
+                        selected: {colorImages},
+                        onSelectionChanged: (value) =>
+                            setState(() => colorImages = value.single),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    ElementPanel(
+                      key: ObjectKey(element),
+                      element: element,
+                      enabled: !busy && !preview,
+                      onChanged: changed,
+                      onImageChanged: () => unawaited(prepareElement(element)),
+                      onDelete: deleteSelected,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (constraints.maxWidth >= 850) {
+        return Row(
+          children: [
+            Expanded(child: canvas()),
+            SizedBox(width: 360, child: inspector),
+          ],
+        );
+      }
+      return Column(
+        children: [
+          Expanded(child: canvas()),
+          SizedBox(
+            height: math.min(340, constraints.maxHeight * .5),
+            child: inspector,
+          ),
+        ],
+      );
+    },
+  );
 
   void labelSettings() => unawaited(
     sheet(
@@ -846,6 +929,7 @@ class _StudioPageState extends State<StudioPage>
                                     scale,
                                     preview ? previewImage : null,
                                     revision,
+                                    colorImages,
                                   ),
                                 ),
                               ),
@@ -988,7 +1072,7 @@ class _StudioPageState extends State<StudioPage>
                       ],
                     ),
                   ),
-                Expanded(child: canvas()),
+                Expanded(child: editorWorkspace()),
                 Container(
                   decoration: const BoxDecoration(
                     color: StudioColors.surface,
@@ -1262,7 +1346,14 @@ String formatDimension(double value) =>
     value >= 1 ? value.toStringAsFixed(0) : value.toStringAsPrecision(3);
 
 class LabelPainter extends CustomPainter {
-  LabelPainter(this.document, this.scale, this.preview, this.revision);
+  LabelPainter(
+    this.document,
+    this.scale,
+    this.preview,
+    this.revision, [
+    this.colorImages = false,
+  ]);
+  final bool colorImages;
   final LabelDocument document;
   final double scale;
   final ui.Image? preview;
@@ -1277,7 +1368,7 @@ class LabelPainter extends CustomPainter {
         Paint()..filterQuality = FilterQuality.none,
       );
     } else {
-      paintLabel(canvas, document);
+      paintLabel(canvas, document, colorImages: colorImages);
     }
   }
 
@@ -1286,7 +1377,8 @@ class LabelPainter extends CustomPainter {
       oldDelegate.revision != revision ||
       oldDelegate.scale != scale ||
       oldDelegate.preview != preview ||
-      oldDelegate.document != document;
+      oldDelegate.document != document ||
+      oldDelegate.colorImages != colorImages;
 }
 
 ({Offset rotate, Offset resize}) _selectionKnobs(
@@ -1445,6 +1537,7 @@ class NumberControl extends StatefulWidget {
 
 class _NumberControlState extends State<NumberControl> {
   late final controller = TextEditingController(text: displayValue);
+  final focus = FocusNode();
   String get displayValue => widget.value.abs() > 0 && widget.value.abs() < 1
       ? widget.value.toStringAsPrecision(3)
       : widget.value == widget.value.roundToDouble()
@@ -1453,12 +1546,15 @@ class _NumberControlState extends State<NumberControl> {
   @override
   void didUpdateWidget(covariant NumberControl oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.value != widget.value) controller.text = displayValue;
+    if (oldWidget.value != widget.value && !focus.hasFocus) {
+      controller.text = displayValue;
+    }
   }
 
   @override
   void dispose() {
     controller.dispose();
+    focus.dispose();
     super.dispose();
   }
 
@@ -1493,6 +1589,7 @@ class _NumberControlState extends State<NumberControl> {
           width: 96,
           child: TextField(
             controller: controller,
+            focusNode: focus,
             enabled: widget.onChanged != null,
             textAlign: TextAlign.center,
             keyboardType: const TextInputType.numberWithOptions(
@@ -1506,6 +1603,15 @@ class _NumberControlState extends State<NumberControl> {
                 vertical: 12,
               ),
             ),
+            onChanged: (text) {
+              final value = double.tryParse(text.replaceAll(',', '.'));
+              if (value != null &&
+                  value.isFinite &&
+                  value >= widget.min &&
+                  value <= widget.max) {
+                widget.onChanged?.call(value);
+              }
+            },
             onSubmitted: submit,
             onTapOutside: (_) {
               submit(controller.text);
