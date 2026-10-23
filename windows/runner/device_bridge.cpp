@@ -11,6 +11,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Devices.Radios.h>
+#include <winrt/Windows.Devices.Enumeration.h>
 
 // C++/WinRT radio inspection; no programmatic power changes are requested.
 #pragma comment(lib, "windowsapp")
@@ -26,6 +27,7 @@
 #include <cstdio>
 #include <deque>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -67,6 +69,7 @@ struct Reply {
   std::string code;
   std::string message;
   DWORD os_error = 0;
+  bool adapter_changed = false;
   bool Error(const char* error_code, const std::string& description, DWORD number) {
     code = error_code;
     message = description;
@@ -94,6 +97,7 @@ struct Request {
   std::vector<uint8_t> bytes;
   int expected = 0;
   int timeout = 3000;
+  uint64_t radio_generation = 0;
 };
 
 const Value* Argument(const Value* args, const char* name) {
@@ -197,11 +201,40 @@ struct DeviceBridge::Impl {
   std::deque<std::pair<Result, Reply>> completions;
   std::mutex socket_mutex;
   SOCKET socket_handle = INVALID_SOCKET;
+  std::atomic<bool> transport_aborted{false};
   std::thread worker;
   std::atomic<bool> picker_open{false};
   std::atomic<HWND> picker_window{nullptr};
   std::thread picker;
   std::wstring template_directory;
+  struct RadioLifetime {
+    struct Entry {
+      uint64_t generation;
+      bool bluetooth = false;
+      bool kind_known = false;
+      bool enabled = false;
+      bool state_known = false;
+      bool permitted = true;
+      bool inspected = false;
+    };
+    std::mutex mutex;
+    Impl* owner = nullptr;
+    uint64_t generation = 0;
+    bool enumerated = false;
+    std::map<std::wstring, Entry> devices;
+  };
+  struct RadioSubscription {
+    winrt::Windows::Devices::Radios::Radio radio{nullptr};
+    winrt::Windows::Devices::Radios::Radio::StateChanged_revoker changed;
+    uint64_t generation;
+  };
+  std::shared_ptr<RadioLifetime> radio_lifetime = std::make_shared<RadioLifetime>();
+  // Created, revoked and released on the existing worker's MTA.
+  winrt::Windows::Devices::Enumeration::DeviceWatcher radio_watcher{nullptr};
+  winrt::Windows::Devices::Enumeration::DeviceWatcher::Added_revoker radio_added;
+  winrt::Windows::Devices::Enumeration::DeviceWatcher::Removed_revoker radio_removed;
+  winrt::Windows::Devices::Enumeration::DeviceWatcher::EnumerationCompleted_revoker radio_enumerated;
+  std::map<std::wstring, RadioSubscription> radio_subscriptions;
 
   Impl(flutter::BinaryMessenger* messenger, HWND parent) : window(parent) {
     WSADATA data{};
@@ -210,10 +243,17 @@ struct DeviceBridge::Impl {
         "d110_studio/device", &flutter::StandardMethodCodec::GetInstance());
     channel->SetMethodCallHandler([this](const flutter::MethodCall<Value>& call,
         std::unique_ptr<flutter::MethodResult<Value>> result) { Handle(call, std::move(result)); });
+    radio_lifetime->owner = this;
     worker = std::thread([this] { Run(); });
   }
 
   ~Impl() {
+    {
+      // Revocation alone does not wait for callbacks already in flight. This
+      // gate drains owner access before any member or Flutter channel teardown.
+      std::lock_guard<std::mutex> lock(radio_lifetime->mutex);
+      radio_lifetime->owner = nullptr;
+    }
     channel->SetMethodCallHandler(nullptr);
     stopping.store(true);
     HWND dialog = picker_window.load();
@@ -255,7 +295,8 @@ struct DeviceBridge::Impl {
     }
     for (auto& completion : pending) {
       if (completion.first) Respond(completion.first, std::move(completion.second));
-      else channel->InvokeMethod("disconnected", std::make_unique<Value>());
+      else channel->InvokeMethod(completion.second.adapter_changed ? "adapterChanged" : "disconnected",
+          std::make_unique<Value>(std::move(completion.second.value)));
     }
   }
 
@@ -406,9 +447,227 @@ struct DeviceBridge::Impl {
     }
   }
 
+  void AbortTransport() {
+    // Callback threads may shutdown, but only the worker closes/replaces the
+    // published handle. No descriptor reuse race and no retry of interrupted IO.
+    {
+      std::lock_guard<std::mutex> lock(socket_mutex);
+      if (socket_handle != INVALID_SOCKET) {
+        transport_aborted.store(true);
+        shutdown(socket_handle, SD_BOTH);
+      }
+    }
+    ready.notify_one();
+  }
+
+  void PublishRadioStateLocked(const RadioLifetime& lifetime) {
+    bool available = false, enabled = false, denied = false, uncertain = false;
+    bool pending = !lifetime.enumerated;
+    for (const auto& device : lifetime.devices) {
+      const auto& entry = device.second;
+      pending = pending || !entry.inspected;
+      if (!entry.inspected) continue;
+      if (!entry.kind_known) {
+        available = true;
+        uncertain = true;
+        continue;
+      }
+      if (!entry.bluetooth) continue;
+      available = true;
+      enabled = enabled || (entry.state_known && entry.permitted && entry.enabled);
+      denied = denied || !entry.permitted;
+      uncertain = uncertain || !entry.state_known;
+    }
+    // An unfinished arrival may be another usable Bluetooth adapter. Do not
+    // publish known-off yet, but a failed inspection must clear stale known-on.
+    // A known usable adapter wins over pending, failed or denied inspections.
+    if (!enabled && pending && !uncertain && !denied) return;
+    bool permitted = enabled || !denied;
+    // Terminal inspection failures are unknown, not proof of power loss. Radio
+    // IDs cannot identify the socket's local adapter, so only a complete, known
+    // all-off/unavailable aggregate may interrupt its transport.
+    if (!enabled && !pending && !uncertain && !denied) AbortTransport();
+    Reply reply;
+    reply.adapter_changed = true;
+    reply.value = flutter::EncodableMap{
+        {Value("available"), Value(available)},
+        {Value("enabled"), enabled ? Value(true) :
+            (uncertain || denied ? Value{} : Value(false))},
+        {Value("permitted"), Value(permitted)}};
+    Complete(Result{}, std::move(reply));
+  }
+
+  void StartRadioWatcher() {
+    try {
+      using namespace winrt::Windows::Devices::Enumeration;
+      using namespace winrt::Windows::Devices::Radios;
+      auto lifetime = radio_lifetime;
+      radio_watcher = DeviceInformation::CreateWatcher(Radio::GetDeviceSelector());
+      radio_added = radio_watcher.Added(winrt::auto_revoke,
+          [lifetime](const DeviceWatcher&, const DeviceInformation& device) {
+        std::lock_guard<std::mutex> lock(lifetime->mutex);
+        if (!lifetime->owner) return;
+        std::wstring id(device.Id().c_str());
+        uint64_t generation = ++lifetime->generation;
+        lifetime->devices.insert_or_assign(id, RadioLifetime::Entry{generation});
+        Request request;
+        request.method = "__radioAdded";
+        request.path = std::move(id);
+        request.radio_generation = generation;
+        lifetime->owner->Enqueue(std::move(request));
+      });
+      radio_removed = radio_watcher.Removed(winrt::auto_revoke,
+          [lifetime](const DeviceWatcher&, const DeviceInformationUpdate& device) {
+        std::lock_guard<std::mutex> lock(lifetime->mutex);
+        if (!lifetime->owner) return;
+        std::wstring id(device.Id().c_str());
+        auto found = lifetime->devices.find(id);
+        if (found == lifetime->devices.end()) return;
+        uint64_t generation = found->second.generation;
+        bool bluetooth = found->second.bluetooth;
+        lifetime->devices.erase(found);
+        if (bluetooth) {
+          lifetime->owner->PublishRadioStateLocked(*lifetime);
+        }
+        Request request;
+        request.method = "__radioRemoved";
+        request.path = std::move(id);
+        request.radio_generation = generation;
+        lifetime->owner->Enqueue(std::move(request));
+        if (!bluetooth) lifetime->owner->PublishRadioStateLocked(*lifetime);
+      });
+      radio_enumerated = radio_watcher.EnumerationCompleted(winrt::auto_revoke,
+          [lifetime](const DeviceWatcher&, const winrt::Windows::Foundation::IInspectable&) {
+        std::lock_guard<std::mutex> lock(lifetime->mutex);
+        if (!lifetime->owner) return;
+        lifetime->enumerated = true;
+        lifetime->owner->PublishRadioStateLocked(*lifetime);
+      });
+      radio_watcher.Start();
+    } catch (const winrt::hresult_error& error) {
+      StopRadioWatcher();
+      OutputDebugStringA(("Bluetooth adapter monitoring unavailable: " +
+          winrt::to_string(error.message()) + "\n").c_str());
+    }
+  }
+
+  void ObserveRadio(const Request& request) {
+    using namespace winrt::Windows::Devices::Radios;
+    bool kind_known = false, bluetooth = false, permitted = true;
+    try {
+      auto pending = Radio::FromIdAsync(winrt::hstring(request.path));
+      Radio radio{nullptr};
+      if (pending.wait_for(std::chrono::seconds(5)) == winrt::Windows::Foundation::AsyncStatus::Started) {
+        pending.Cancel();
+        OutputDebugStringA("Bluetooth radio subscription timed out\n");
+      } else {
+        radio = pending.get();
+      }
+      if (radio) {
+        auto kind = radio.Kind();
+        bluetooth = kind == RadioKind::Bluetooth;
+        // Other (or a future unrecognized kind) cannot prove that this device
+        // is irrelevant to Bluetooth availability.
+        kind_known = bluetooth || kind == RadioKind::WiFi || kind == RadioKind::FM;
+      }
+      if (bluetooth) {
+        auto lifetime = radio_lifetime;
+        auto id = request.path;
+        auto generation = request.radio_generation;
+        auto changed = radio.StateChanged(winrt::auto_revoke,
+            [lifetime, id, generation](const Radio& sender, const winrt::Windows::Foundation::IInspectable&) {
+          std::lock_guard<std::mutex> lock(lifetime->mutex);
+          auto found = lifetime->devices.find(id);
+          if (!lifetime->owner || found == lifetime->devices.end() ||
+              found->second.generation != generation || !found->second.bluetooth) return;
+          auto& entry = found->second;
+          bool enabled = false, state_known = false, permitted = true;
+          try {
+            auto state = sender.State();
+            enabled = state == RadioState::On;
+            state_known = enabled || state == RadioState::Off || state == RadioState::Disabled;
+          } catch (const winrt::hresult_error& error) {
+            permitted = error.code().value != E_ACCESSDENIED;
+          }
+          if (entry.enabled == enabled && entry.state_known == state_known &&
+              entry.permitted == permitted) return;
+          entry.enabled = enabled;
+          entry.state_known = state_known;
+          entry.permitted = permitted;
+          lifetime->owner->PublishRadioStateLocked(*lifetime);
+        });
+        {
+          std::lock_guard<std::mutex> lock(lifetime->mutex);
+          auto found = lifetime->devices.find(id);
+          // FromIdAsync may finish after removal or replacement of the same ID.
+          // A generation check also rejects callbacks from old subscriptions.
+          if (!lifetime->owner || found == lifetime->devices.end() ||
+              found->second.generation != generation) return;
+          bool enabled = false, state_known = false;
+          try {
+            auto state = radio.State();
+            enabled = state == RadioState::On;
+            state_known = enabled || state == RadioState::Off || state == RadioState::Disabled;
+          } catch (const winrt::hresult_error& error) {
+            permitted = error.code().value != E_ACCESSDENIED;
+          }
+          found->second.bluetooth = true;
+          found->second.kind_known = true;
+          found->second.inspected = true;
+          found->second.enabled = enabled;
+          found->second.state_known = state_known;
+          found->second.permitted = permitted;
+          PublishRadioStateLocked(*lifetime);
+        }
+        // Never revoke while holding the callback gate: callbacks may be
+        // waiting on it. The worker alone owns this subscription collection.
+        radio_subscriptions.insert_or_assign(id, RadioSubscription{radio, std::move(changed), generation});
+        return;
+      }
+    } catch (const winrt::hresult_error& error) {
+      // Access denied before the kind is known does not establish that
+      // Bluetooth permission was denied.
+      permitted = !bluetooth || error.code().value != E_ACCESSDENIED;
+      OutputDebugStringA(("Bluetooth radio subscription failed: " +
+          winrt::to_string(error.message()) + "\n").c_str());
+    }
+    // Timeout, cancellation/error, null result, kind inspection failure and
+    // subscription failure all terminate only the matching arrival generation.
+    std::lock_guard<std::mutex> lock(radio_lifetime->mutex);
+    auto found = radio_lifetime->devices.find(request.path);
+    if (!radio_lifetime->owner || found == radio_lifetime->devices.end() ||
+        found->second.generation != request.radio_generation) return;
+    found->second.bluetooth = bluetooth;
+    found->second.kind_known = kind_known;
+    found->second.inspected = true;
+    found->second.enabled = false;
+    found->second.state_known = false;
+    found->second.permitted = permitted;
+    PublishRadioStateLocked(*radio_lifetime);
+  }
+
+  void StopRadioWatcher() {
+    radio_added.revoke();
+    radio_removed.revoke();
+    radio_enumerated.revoke();
+    if (radio_watcher) {
+      try {
+        auto status = radio_watcher.Status();
+        using winrt::Windows::Devices::Enumeration::DeviceWatcherStatus;
+        if (status == DeviceWatcherStatus::Started || status == DeviceWatcherStatus::EnumerationCompleted)
+          radio_watcher.Stop();
+      } catch (const winrt::hresult_error&) {
+        // The callback gate is already closed during teardown.
+      }
+    }
+    radio_subscriptions.clear();
+    radio_watcher = nullptr;
+  }
+
   bool WaitSocket(bool writing, Clock::time_point deadline, Reply& reply, bool quiet = false) {
     for (;;) {
       if (stopping.load()) return reply.Error("cancelled", "Application is closing", ERROR_CANCELLED);
+      if (transport_aborted.load()) return reply.Error("bluetooth_disabled", "Bluetooth radio became unavailable", ERROR_NOT_READY);
       auto now = Clock::now();
       auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
       if (now >= deadline) {
@@ -508,6 +767,7 @@ struct DeviceBridge::Impl {
     if (winsock_error) return reply.SocketError("Starting Winsock", winsock_error);
     {
       std::lock_guard<std::mutex> lock(socket_mutex);
+      transport_aborted.store(false);
       socket_handle = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
     }
     if (socket_handle == INVALID_SOCKET) return reply.SocketError("Creating RFCOMM channel 1 socket");
@@ -715,19 +975,34 @@ struct DeviceBridge::Impl {
   }
 
   void Run() {
+    struct Apartment {
+      HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+    } apartment;
+    if (SUCCEEDED(apartment.result)) StartRadioWatcher();
     for (;;) {
       Request request;
       {
         std::unique_lock<std::mutex> lock(queue_mutex);
         if (socket_handle != INVALID_SOCKET) {
-          ready.wait_for(lock, std::chrono::milliseconds(500), [this] { return stopping.load() || !queue.empty(); });
+          ready.wait_for(lock, std::chrono::milliseconds(500), [this] {
+            return stopping.load() || transport_aborted.load() || !queue.empty();
+          });
         } else {
-          ready.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+          ready.wait(lock, [this] { return stopping.load() || transport_aborted.load() || !queue.empty(); });
         }
         if (stopping.load()) break;
+        if (transport_aborted.load()) { lock.unlock(); CloseSocket(); transport_aborted.store(false); continue; }
         if (queue.empty()) { lock.unlock(); CheckDisconnect(); continue; }
         request = std::move(queue.front());
         queue.pop_front();
+      }
+      if (request.method == "__radioAdded") { ObserveRadio(request); continue; }
+      if (request.method == "__radioRemoved") {
+        auto found = radio_subscriptions.find(request.path);
+        if (found != radio_subscriptions.end() && found->second.generation == request.radio_generation)
+          radio_subscriptions.erase(found);
+        continue;
       }
       Reply reply;
       bool success = true;
@@ -754,6 +1029,7 @@ struct DeviceBridge::Impl {
       if (!success && (request.method == "connect" || request.method == "write" || request.method == "exchange")) CloseSocket();
       Complete(std::move(request.result), std::move(reply));
     }
+    StopRadioWatcher();
     CloseSocket();
   }
 };

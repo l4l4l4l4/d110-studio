@@ -46,6 +46,8 @@ class PrinterConnectionController extends ChangeNotifier {
   String? _lastAddress;
   Future<void>? _flight;
   bool _disposed = false;
+  int _adapterGeneration = 0;
+  bool _restorePending = false;
 
   PrinterConnectionPhase get phase => _phase;
   String get message => _message;
@@ -56,15 +58,82 @@ class PrinterConnectionController extends ChangeNotifier {
 
   void _set(PrinterConnectionPhase phase, String message) {
     if (_disposed) return;
+    if (_phase == phase && _message == message) return;
     _phase = phase;
     _message = message;
     notifyListeners();
   }
 
+  bool _blockedByAdapter({bool checkPermission = true}) {
+    final adapter = printer.observedAdapter;
+    if (adapter == null) return false;
+    if (!adapter.available || adapter.enabled == false) {
+      _restorePending = false;
+      _address = null;
+      _set(
+        adapter.available
+            ? PrinterConnectionPhase.bluetoothOff
+            : PrinterConnectionPhase.adapterUnavailable,
+        adapter.available
+            ? 'Bluetooth выключен'
+            : 'Bluetooth-адаптер недоступен',
+      );
+      return true;
+    }
+    if (checkPermission && !adapter.permitted) {
+      _restorePending = false;
+      if (!printer.connected) _address = null;
+      _set(
+        PrinterConnectionPhase.permissionRequired,
+        'Разрешите доступ к Bluetooth при подключении',
+      );
+      return true;
+    }
+    if (adapter.permitted && adapter.enabled == null) {
+      _restorePending = false;
+      if (!printer.connected) _address = null;
+      _set(
+        PrinterConnectionPhase.failed,
+        'Не удалось определить состояние Bluetooth. Проверьте настройки и повторите подключение.',
+      );
+      return true;
+    }
+    return false;
+  }
+
+  void _drainRestore() {
+    if (_disposed || !_restorePending || _flight != null || printer.busy) {
+      return;
+    }
+    _restorePending = false;
+    unawaited(restore());
+  }
+
   void _onTransportChanged() {
-    if (_disposed || printer.connected) return;
+    if (_disposed) return;
+    final changed = _adapterGeneration != printer.adapterGeneration;
+    _adapterGeneration = printer.adapterGeneration;
+    if (_blockedByAdapter()) return;
+    final adapter = printer.observedAdapter;
+    if (changed &&
+        adapter != null &&
+        adapter.permitted &&
+        adapter.enabled == true &&
+        !printer.connected) {
+      _restorePending = true;
+    }
+    if (_restorePending) {
+      _drainRestore();
+      return;
+    }
     // Failed handshakes are classified by the operation's catch, not by cleanup.
-    if (_flight != null) return;
+    if (printer.connected) {
+      if (changed && _flight == null) {
+        _set(PrinterConnectionPhase.connected, 'D110 · $_address');
+      }
+      return;
+    }
+    if (_flight != null || printer.busy) return;
     _address = null;
     _set(
       PrinterConnectionPhase.disconnected,
@@ -100,16 +169,25 @@ class PrinterConnectionController extends ChangeNotifier {
           } else {
             completion.complete();
           }
+          _drainRestore();
         });
     return completion.future;
   }
 
   /// Passive until a saved printer and an already-permitted, enabled adapter exist.
   Future<void> restore() => _run(() async {
-    if (printer.connected) return;
-    _set(PrinterConnectionPhase.restoring, 'Проверяем последнее подключение…');
+    if (!printer.connected) {
+      _set(
+        PrinterConnectionPhase.restoring,
+        'Проверяем последнее подключение…',
+      );
+    }
     _lastAddress = await printer.lastPrinterAddress();
     if (_disposed || !await _adapterReady()) return;
+    if (printer.connected) {
+      _set(PrinterConnectionPhase.connected, 'D110 · $_address');
+      return;
+    }
     if (_lastAddress == null) {
       _set(PrinterConnectionPhase.selectPrinter, 'Выберите принтер D110');
       return;
@@ -134,11 +212,7 @@ class PrinterConnectionController extends ChangeNotifier {
       );
       return false;
     }
-    if (adapter.enabled != true) {
-      _set(PrinterConnectionPhase.bluetoothOff, 'Bluetooth выключен');
-      return false;
-    }
-    return true;
+    return !_blockedByAdapter();
   }
 
   /// Android returns the actual OS prompt result. Desktop settings launch is not
@@ -181,8 +255,11 @@ class PrinterConnectionController extends ChangeNotifier {
     _set(PrinterConnectionPhase.connecting, 'Подключаем D110…');
     await printer.connect(address);
     if (_disposed) return;
+    _restorePending = false;
     _address = address.trim().toUpperCase();
     _lastAddress = _address;
+    // Native connect may have just obtained Android's Bluetooth permission.
+    if (!await _adapterReady()) return;
     _set(PrinterConnectionPhase.connected, 'D110 · $_address');
   }
 
@@ -191,7 +268,7 @@ class PrinterConnectionController extends ChangeNotifier {
     await _run(() async {
       _set(PrinterConnectionPhase.discovering, 'Ищем Bluetooth-принтеры…');
       devices = await printer.devices();
-      if (_disposed) return;
+      if (_disposed || _blockedByAdapter()) return;
       _set(
         printer.connected
             ? PrinterConnectionPhase.connected
@@ -204,6 +281,9 @@ class PrinterConnectionController extends ChangeNotifier {
 
   void _failure(Object error) {
     if (_disposed) return;
+    // The native request's error classifies an explicit denial; a cached
+    // missing-permission state must not turn it back into an unasked request.
+    if (_blockedByAdapter(checkPermission: false)) return;
     final code = switch (error) {
       PrinterException value => value.code,
       PlatformException value => value.code,

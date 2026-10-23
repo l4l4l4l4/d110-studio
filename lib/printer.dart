@@ -80,9 +80,27 @@ class BluetoothAdapterState {
   });
 
   final bool available;
-  // Null means the OS will not disclose power state before permission is granted.
+  // Null means power is undisclosed before permission, or inspection failed even
+  // though permission is granted. It does not prove the adapter is switched off.
   final bool? enabled;
   final bool permitted;
+
+  factory BluetoothAdapterState.fromMessage(Object? value) {
+    if (value is! Map ||
+        value['available'] is! bool ||
+        value['permitted'] is! bool ||
+        (value['enabled'] != null && value['enabled'] is! bool)) {
+      throw const PrinterException(
+        'Invalid Bluetooth adapter state',
+        code: 'bridge_error',
+      );
+    }
+    return BluetoothAdapterState(
+      available: value['available'] as bool,
+      enabled: value['enabled'] as bool?,
+      permitted: value['permitted'] as bool,
+    );
+  }
 }
 
 enum BluetoothEnableResult { enabled, declined, settingsOpened }
@@ -98,6 +116,11 @@ class PrinterClient extends ChangeNotifier {
       if (call.method == 'disconnected') {
         _markDisconnected();
       }
+      if (call.method == 'adapterChanged') {
+        _adapterGeneration++;
+        _observeAdapter(BluetoothAdapterState.fromMessage(call.arguments));
+        if (!_disposed) notifyListeners();
+      }
     });
   }
 
@@ -112,9 +135,23 @@ class PrinterClient extends ChangeNotifier {
   bool _busy = false;
   bool _disposed = false;
   int _disconnectGeneration = 0;
+  int _adapterGeneration = 0;
+  int _adapterLossGeneration = 0;
+  BluetoothAdapterState? _observedAdapter;
 
   bool get connected => _connected;
   bool get busy => _busy;
+  int get adapterGeneration => _adapterGeneration;
+  BluetoothAdapterState? get observedAdapter => _observedAdapter;
+
+  void _observeAdapter(BluetoothAdapterState state) {
+    _observedAdapter = state;
+    if (!state.available || state.enabled == false) {
+      _connected = false;
+      _disconnectGeneration++;
+      _adapterLossGeneration++;
+    }
+  }
 
   void _markDisconnected() {
     _connected = false;
@@ -145,6 +182,7 @@ class PrinterClient extends ChangeNotifier {
     } finally {
       _busy = false;
       if (_disposed) await _closeAfterFailure();
+      if (!_disposed) notifyListeners();
     }
   }
 
@@ -220,23 +258,14 @@ class PrinterClient extends ChangeNotifier {
   }
 
   Future<BluetoothAdapterState> adapterState() => _singleFlight(() async {
+    final generation = _adapterGeneration;
     final value = await _channel.invokeMapMethod<String, Object?>(
       'adapterState',
     );
-    if (value == null ||
-        value['available'] is! bool ||
-        value['permitted'] is! bool ||
-        (value['enabled'] != null && value['enabled'] is! bool)) {
-      throw const PrinterException(
-        'Invalid Bluetooth adapter state',
-        code: 'bridge_error',
-      );
-    }
-    return BluetoothAdapterState(
-      available: value['available'] as bool,
-      enabled: value['enabled'] as bool?,
-      permitted: value['permitted'] as bool,
-    );
+    final state = BluetoothAdapterState.fromMessage(value);
+    // A power broadcast received during the query is newer than its reply.
+    if (generation == _adapterGeneration) _observeAdapter(state);
+    return _observedAdapter ?? state;
   });
 
   Future<BluetoothEnableResult> requestEnableBluetooth() =>
@@ -265,9 +294,31 @@ class PrinterClient extends ChangeNotifier {
     }
     _connected = false;
     try {
+      final adapterLossGeneration = _adapterLossGeneration;
+      // Native connect also closes an old socket. Finish that intentional
+      // disconnect before observing failures in the replacement handshake.
+      await _channel.invokeMethod<void>('disconnect');
+      _requireActive();
+      final adapter = _observedAdapter;
+      if (adapter != null && (!adapter.available || adapter.enabled == false)) {
+        throw PrinterException(
+          adapter.available
+              ? 'Bluetooth is switched off'
+              : 'The Bluetooth adapter is unavailable',
+          code: adapter.available
+              ? 'bluetooth_disabled'
+              : 'bluetooth_unavailable',
+        );
+      }
+      if (adapterLossGeneration != _adapterLossGeneration) {
+        throw const PrinterException(
+          'Bluetooth was interrupted while disconnecting the previous printer',
+          code: 'disconnected',
+        );
+      }
+      final generation = _disconnectGeneration;
       await _channel.invokeMethod<void>('connect', {'address': normalized});
       _requireActive();
-      final generation = _disconnectGeneration;
       await _readModel();
       if (generation != _disconnectGeneration) {
         throw const PrinterException(

@@ -192,6 +192,10 @@ struct DeviceBridge::Impl {
   Call picker_call;
   GMainContext* context;
   GCancellable* cancellable;
+  GDBusObjectManager* radio_manager = nullptr;
+  bool radio_state_known = false;
+  bool radio_available = false;
+  bool radio_enabled = false;
   std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
   std::atomic<bool> stopping{false};
   std::mutex queue_mutex;
@@ -199,6 +203,7 @@ struct DeviceBridge::Impl {
   std::deque<Request> queue;
   std::mutex socket_mutex;
   int socket_fd = -1;
+  std::atomic<bool> transport_aborted{false};
   std::thread worker;
   std::string template_directory;
 
@@ -212,10 +217,17 @@ struct DeviceBridge::Impl {
     }, this, nullptr);
     template_directory = std::string(g_get_user_data_dir()) + "/d110-studio";
     worker = std::thread([this] { Run(); });
+    WatchAdapter();
   }
 
   ~Impl() {
     alive->store(false);
+    // Manager signals and async completion run only on the constructing UI
+    // context. Disconnect first; the async initializer also checks alive.
+    if (radio_manager) {
+      g_signal_handlers_disconnect_by_data(radio_manager, this);
+      g_clear_object(&radio_manager);
+    }
     fl_method_channel_set_method_call_handler(channel, nullptr, nullptr, nullptr);
     if (chooser) {
       g_signal_handlers_disconnect_by_data(chooser, this);
@@ -265,6 +277,114 @@ struct DeviceBridge::Impl {
       queue.push_back(std::move(request));
     }
     ready.notify_one();
+  }
+
+  void WatchAdapter() {
+    struct Initialization {
+      Impl* self;
+      std::shared_ptr<std::atomic<bool>> alive;
+    };
+    auto* initialization = new Initialization{this, alive};
+    // This subscribes to ObjectManager/PropertiesChanged, including BlueZ
+    // owner replacement, without starting BlueZ or changing radio power.
+    g_dbus_object_manager_client_new_for_bus(G_BUS_TYPE_SYSTEM,
+        G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_DO_NOT_AUTO_START, "org.bluez", "/",
+        nullptr, nullptr, nullptr, cancellable,
+        [](GObject*, GAsyncResult* result, gpointer data) {
+          std::unique_ptr<Initialization> initialization(static_cast<Initialization*>(data));
+          g_autoptr(GError) error = nullptr;
+          GDBusObjectManager* manager = g_dbus_object_manager_client_new_for_bus_finish(result, &error);
+          if (!initialization->alive->load()) {
+            if (manager) g_object_unref(manager);
+            return;
+          }
+          if (!manager) {
+            g_warning("Bluetooth adapter monitoring unavailable: %s", error->message);
+            return;
+          }
+          auto* self = initialization->self;
+          self->radio_manager = manager;
+          g_signal_connect(manager, "object-added", G_CALLBACK(+[](
+              GDBusObjectManager*, GDBusObject* object, gpointer data) {
+            g_autoptr(GDBusInterface) adapter = g_dbus_object_get_interface(object, "org.bluez.Adapter1");
+            if (adapter) static_cast<Impl*>(data)->AdapterChanged();
+          }), self);
+          g_signal_connect(manager, "object-removed", G_CALLBACK(+[](
+              GDBusObjectManager*, GDBusObject* object, gpointer data) {
+            g_autoptr(GDBusInterface) adapter = g_dbus_object_get_interface(object, "org.bluez.Adapter1");
+            if (adapter) static_cast<Impl*>(data)->AdapterChanged(true);
+          }), self);
+          g_signal_connect(manager, "interface-added", G_CALLBACK(+[](
+              GDBusObjectManager*, GDBusObject*, GDBusInterface* interface, gpointer data) {
+            if (g_str_equal(g_dbus_proxy_get_interface_name(G_DBUS_PROXY(interface)), "org.bluez.Adapter1"))
+              static_cast<Impl*>(data)->AdapterChanged();
+          }), self);
+          g_signal_connect(manager, "interface-removed", G_CALLBACK(+[](
+              GDBusObjectManager*, GDBusObject*, GDBusInterface* interface, gpointer data) {
+            if (g_str_equal(g_dbus_proxy_get_interface_name(G_DBUS_PROXY(interface)), "org.bluez.Adapter1"))
+              static_cast<Impl*>(data)->AdapterChanged(true);
+          }), self);
+          g_signal_connect(manager, "interface-proxy-properties-changed", G_CALLBACK(+[](
+              GDBusObjectManagerClient*, GDBusObjectProxy*, GDBusProxy* proxy,
+              GVariant* changed, const gchar* const* invalidated, gpointer data) {
+            if (!g_str_equal(g_dbus_proxy_get_interface_name(proxy), "org.bluez.Adapter1")) return;
+            gboolean powered = FALSE;
+            bool changed_power = g_variant_lookup(changed, "Powered", "b", &powered);
+            bool invalidated_power = invalidated && g_strv_contains(invalidated, "Powered");
+            if (changed_power || invalidated_power)
+              static_cast<Impl*>(data)->AdapterChanged(invalidated_power || !powered);
+          }), self);
+          g_signal_connect(manager, "notify::name-owner", G_CALLBACK(+[](
+              GObject*, GParamSpec*, gpointer data) {
+            static_cast<Impl*>(data)->AdapterChanged();
+          }), self);
+          self->AdapterChanged();
+        }, initialization);
+  }
+
+  void AbortTransport() {
+    // Only the single-flight worker closes/replaces descriptors. Shutdown under
+    // its publication lock interrupts IO without racing descriptor reuse.
+    {
+      std::lock_guard<std::mutex> lock(socket_mutex);
+      if (socket_fd >= 0) {
+        transport_aborted.store(true);
+        shutdown(socket_fd, SHUT_RDWR);
+      }
+    }
+    ready.notify_one();
+  }
+
+  void AdapterChanged(bool lost_radio = false) {
+    bool available = false, enabled = false;
+    g_autofree gchar* owner = g_dbus_object_manager_client_get_name_owner(
+        G_DBUS_OBJECT_MANAGER_CLIENT(radio_manager));
+    if (owner) {
+      GList* objects = g_dbus_object_manager_get_objects(radio_manager);
+      for (GList* item = objects; item; item = item->next) {
+        g_autoptr(GDBusInterface) adapter = g_dbus_object_get_interface(
+            G_DBUS_OBJECT(item->data), "org.bluez.Adapter1");
+        if (!adapter) continue;
+        available = true;
+        g_autoptr(GVariant) powered = g_dbus_proxy_get_cached_property(G_DBUS_PROXY(adapter), "Powered");
+        enabled = enabled || (powered && g_variant_is_of_type(powered, G_VARIANT_TYPE_BOOLEAN) &&
+                              g_variant_get_boolean(powered));
+      }
+      g_list_free_full(objects, g_object_unref);
+    }
+    // No adapter identity is retained for this RFCOMM socket. If another
+    // adapter remains usable, leave its transport alone and let actual socket
+    // failure detect loss of a particular bound adapter.
+    if (!enabled) AbortTransport();
+    if (radio_state_known && available == radio_available && enabled == radio_enabled && !lost_radio) return;
+    radio_state_known = true;
+    radio_available = available;
+    radio_enabled = enabled;
+    g_autoptr(FlValue) value = fl_value_new_map();
+    fl_value_set_string_take(value, "available", fl_value_new_bool(available));
+    fl_value_set_string_take(value, "enabled", fl_value_new_bool(enabled));
+    fl_value_set_string_take(value, "permitted", fl_value_new_bool(true));
+    fl_method_channel_invoke_method(channel, "adapterChanged", value, nullptr, nullptr, nullptr);
   }
 
   void Handle(FlMethodCall* call) {
@@ -392,6 +512,7 @@ struct DeviceBridge::Impl {
   bool WaitSocket(short events, Clock::time_point deadline, Reply& reply, bool quiet = false) {
     for (;;) {
       if (stopping.load()) return reply.Error("cancelled", "Application is closing", ECANCELED);
+      if (transport_aborted.load()) return reply.Error("bluetooth_disabled", "Bluetooth radio became unavailable", ENETDOWN);
       auto now = Clock::now();
       auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
       if (now >= deadline) {
@@ -440,6 +561,7 @@ struct DeviceBridge::Impl {
     CloseSocket();
     {
       std::lock_guard<std::mutex> lock(socket_mutex);
+      transport_aborted.store(false);
       socket_fd = socket(AF_BLUETOOTH, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, BTPROTO_RFCOMM);
     }
     if (socket_fd < 0) return reply.SystemError("Creating RFCOMM channel 1 socket");
@@ -678,11 +800,14 @@ struct DeviceBridge::Impl {
       {
         std::unique_lock<std::mutex> lock(queue_mutex);
         if (socket_fd >= 0) {
-          ready.wait_for(lock, std::chrono::milliseconds(500), [this] { return stopping.load() || !queue.empty(); });
+          ready.wait_for(lock, std::chrono::milliseconds(500), [this] {
+            return stopping.load() || transport_aborted.load() || !queue.empty();
+          });
         } else {
-          ready.wait(lock, [this] { return stopping.load() || !queue.empty(); });
+          ready.wait(lock, [this] { return stopping.load() || transport_aborted.load() || !queue.empty(); });
         }
         if (stopping.load()) break;
+        if (transport_aborted.load()) { lock.unlock(); CloseSocket(); transport_aborted.store(false); continue; }
         if (queue.empty()) { lock.unlock(); CheckDisconnect(); continue; }
         request = std::move(queue.front());
         queue.pop_front();

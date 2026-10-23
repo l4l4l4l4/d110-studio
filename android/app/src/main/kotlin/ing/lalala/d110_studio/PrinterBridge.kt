@@ -73,6 +73,38 @@ class PrinterBridge(
     @Volatile private var socket: BluetoothSocket? = null
     @Volatile private var destroyed = false
     private var aclReceiver: BroadcastReceiver? = null
+    // Guarded by connectionLock so a connect cannot publish a socket after a power-off event.
+    private var adapterPowerState: Int? = null
+    // Only read and written by main-thread notification delivery.
+    private var lastAdapterState: Map<String, Any?>? = null
+    private val adapterReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val powerState = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            if (powerState != BluetoothAdapter.STATE_ON &&
+                powerState != BluetoothAdapter.STATE_OFF &&
+                powerState != BluetoothAdapter.STATE_TURNING_ON &&
+                powerState != BluetoothAdapter.STATE_TURNING_OFF) return
+            val current = synchronized(connectionLock) {
+                if (destroyed) return
+                adapterPowerState = powerState
+                socket
+            }
+            val state = adapterState(powerState)
+            main.post {
+                if (!destroyed && lastAdapterState != state) {
+                    lastAdapterState = state
+                    channel.invokeMethod("adapterChanged", state)
+                }
+            }
+            if (powerState == BluetoothAdapter.STATE_OFF ||
+                powerState == BluetoothAdapter.STATE_TURNING_OFF) {
+                // This handler is independent of blocked connect/write work.
+                // The identity check cannot close a replacement socket after power-on.
+                if (current != null) closeConnection(current)
+            }
+        }
+    }
     @Volatile private var documentCancellation: CancellationSignal? = null
     @Volatile private var documentInput: InputStream? = null
     private var pendingPermission: PermissionAction? = null
@@ -118,6 +150,9 @@ class PrinterBridge(
 
     init {
         channel.setMethodCallHandler(this)
+        // ACTION_STATE_CHANGED is protected by Android; registration is passive even
+        // before Nearby Devices permission is granted and lasts for the whole bridge.
+        registerReceiver(adapterReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -322,7 +357,7 @@ class PrinterBridge(
         }
     }
 
-    private fun adapterState(): Map<String, Any?> {
+    private fun adapterState(powerState: Int? = null): Map<String, Any?> {
         val manager = activity.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         val adapter = manager?.adapter
         val canReadAdapter = Build.VERSION.SDK_INT < 31 ||
@@ -331,7 +366,9 @@ class PrinterBridge(
             activity.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED)
         return mapOf(
             "available" to (adapter != null),
-            "enabled" to if (adapter != null && canReadAdapter) adapter.isEnabled else null,
+            "enabled" to if (adapter != null && canReadAdapter) {
+                powerState?.let { it == BluetoothAdapter.STATE_ON } ?: adapter.isEnabled
+            } else null,
             "permitted" to permitted,
         )
     }
@@ -458,6 +495,10 @@ class PrinterBridge(
             if (destroyed) {
                 candidate.close()
                 throw BridgeFailure("disposed", "The device bridge has been closed")
+            }
+            if (adapterPowerState != null && adapterPowerState != BluetoothAdapter.STATE_ON) {
+                candidate.close()
+                throw BridgeFailure("bluetooth_disabled", "Turn on Bluetooth in system settings")
             }
             socket = candidate
         }
@@ -815,6 +856,11 @@ class PrinterBridge(
         synchronized(connectionLock) {
             if (destroyed) return
             destroyed = true
+            try {
+                activity.unregisterReceiver(adapterReceiver)
+            } catch (_: IllegalArgumentException) {
+                // Activity destruction may already have removed the receiver.
+            }
         }
         channel.setMethodCallHandler(null)
         pendingPermission = null
