@@ -16,6 +16,7 @@ import 'shortener.dart';
 import 'qr_calibration.dart';
 import 'app_state_store.dart';
 import 'last_printed.dart';
+import 'workspace.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -111,27 +112,40 @@ class _StudioPageState extends State<StudioPage>
   final printer = PrinterClient();
   final stateStore = AppStateStore();
   late final lastPrinted = LastPrintedHistory(stateStore);
-  LabelDocument document = LabelDocument(
-    elements: [
-      LabelElement(
-        kind: ElementKind.text,
-        text: 'Моя этикетка',
-        x: 16,
-        y: 30,
-        width: 205,
-        height: 40,
-      ),
-    ],
+  late DesignWorkspace workspace = DesignWorkspace(
+    LabelDocument(
+      elements: [
+        LabelElement(
+          kind: ElementKind.text,
+          text: 'Моя этикетка',
+          x: 16,
+          y: 30,
+          width: 205,
+          height: 40,
+        ),
+      ],
+    ),
   );
-  LabelElement? selected;
+  DesignTab get activeTab => workspace.active;
+  LabelDocument get document => activeTab.document;
+  LabelElement? get selected => activeTab.selected;
+  set selected(LabelElement? value) => activeTab.selected = value;
   List<Map<String, dynamic>> templates = [];
   late final connection = PrinterConnectionController(printer);
   String? error;
-  bool busy = true, preview = false;
-  bool inspectorOpen = false, colorImages = false;
-  ui.Image? previewImage;
-  Timer? previewTimer;
-  int previewVersion = 0;
+  bool busy = true;
+  bool get preview => activeTab.preview;
+  set preview(bool value) => activeTab.preview = value;
+  bool get inspectorOpen => activeTab.inspectorOpen;
+  set inspectorOpen(bool value) => activeTab.inspectorOpen = value;
+  bool get colorImages => activeTab.colorImages;
+  set colorImages(bool value) => activeTab.colorImages = value;
+  ui.Image? get previewImage => activeTab.previewImage;
+  Timer? _workspaceTimer;
+  Future<void> _stateWrites = Future.value();
+  bool _stateReady = false;
+  String? _storageError;
+  (String, String, bool, double)? _tabRevealState;
   Offset? dragPoint;
   double startX = 0,
       startY = 0,
@@ -144,8 +158,10 @@ class _StudioPageState extends State<StudioPage>
   _DragHandle? activeHandle, pointerHandle;
   Offset? pointerDown;
   Rect? selectionBounds;
-  double viewZoom = 1;
-  Offset viewPan = Offset.zero;
+  double get viewZoom => activeTab.viewZoom;
+  set viewZoom(double value) => activeTab.viewZoom = value;
+  Offset get viewPan => activeTab.viewPan;
+  set viewPan(Offset value) => activeTab.viewPan = value;
   bool zoomingLabel = false;
   double startZoom = 1;
   Offset startPan = Offset.zero;
@@ -154,7 +170,8 @@ class _StudioPageState extends State<StudioPage>
     vsync: this,
     duration: const Duration(milliseconds: 650),
   )..repeat();
-  int revision = 0;
+  int get revision => activeTab.revision;
+  set revision(int value) => activeTab.revision = value;
   bool get native => !kIsWeb;
 
   @override
@@ -163,7 +180,7 @@ class _StudioPageState extends State<StudioPage>
     WidgetsBinding.instance.addObserver(this);
     connection.addListener(_connectionChanged);
     selected = document.elements.first;
-    unawaited(_restoreLastPrinted());
+    unawaited(_restoreWorkspace());
     if (native) unawaited(_loadTemplates());
     if (native) unawaited(connection.restore());
   }
@@ -177,27 +194,168 @@ class _StudioPageState extends State<StudioPage>
     if (native && state == AppLifecycleState.resumed && !busy) {
       unawaited(connection.restore());
     }
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      _workspaceTimer?.cancel();
+      unawaited(_persistWorkspace());
+    }
   }
 
-  Future<void> _restoreLastPrinted() async {
+  Future<void> _restoreWorkspace() async {
+    String? drafts;
+    String? printed;
+    var draftsReadable = true;
     try {
-      final next = await lastPrinted.restore();
-      if (next != null) {
+      drafts = await stateStore.read(AppStateSlot.workspace);
+    } catch (e) {
+      draftsReadable = false;
+      _storageError = 'Черновики не загружены и не будут перезаписаны: $e';
+    }
+    try {
+      printed = await lastPrinted.readSnapshot();
+    } catch (e) {
+      _storageError =
+          '${_storageError == null ? '' : '${_storageError!}\n'}'
+          'Последний отпечаток не загружен: $e';
+    }
+    try {
+      if (drafts != null || printed != null) {
+        final next = await DesignWorkspace.restore(
+          drafts,
+          printedSnapshot: printed,
+        );
         if (!mounted) {
           next.dispose();
           return;
         }
-        document.dispose();
-        document = next;
-        selected = next.elements.firstOrNull;
-        revision++;
+        workspace.dispose();
+        workspace = next;
+        if (next.printedRestoreError != null) {
+          _storageError =
+              '${_storageError == null ? '' : '${_storageError!}\n'}'
+              '${next.printedRestoreError}';
+        }
       }
+      _stateReady = draftsReadable;
     } catch (e) {
-      if (mounted) error = 'Не удалось открыть последний отпечаток: $e';
+      _storageError = 'Черновики не восстановлены и не будут перезаписаны: $e';
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() => busy = false);
+        if (preview) refreshPreview();
+        _saveWorkspaceSoon();
+      }
     }
   }
+
+  void _saveWorkspaceSoon() {
+    if (!_stateReady) return;
+    _workspaceTimer?.cancel();
+    _workspaceTimer = Timer(const Duration(milliseconds: 200), () {
+      unawaited(_persistWorkspace());
+    });
+  }
+
+  Future<void> _persistWorkspace() {
+    if (!_stateReady) return Future.value();
+    final snapshot = jsonEncode(workspace.toJson());
+    final write = _stateWrites.then(
+      (_) => stateStore.write(AppStateSlot.workspace, snapshot),
+    );
+    _stateWrites = write.then<void>(
+      (_) {
+        if (mounted &&
+            _storageError?.startsWith('Черновики не сохранены') == true) {
+          setState(() => _storageError = null);
+        }
+      },
+      onError: (Object e, StackTrace stack) {
+        if (mounted) {
+          setState(() => _storageError = 'Черновики не сохранены: $e');
+        }
+      },
+    );
+    return _stateWrites;
+  }
+
+  void _resetGesture() {
+    dragPoint = pointerDown = zoomFocal = null;
+    activeHandle = pointerHandle = null;
+    selectionBounds = null;
+    zoomingLabel = false;
+  }
+
+  void activateTab(String id) {
+    if (busy || id == workspace.activeId) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      workspace.activate(id);
+      _resetGesture();
+    });
+    if (preview) refreshPreview();
+    _saveWorkspaceSoon();
+  }
+
+  LabelDocument createDesignDocument(String name) => LabelDocument(name: name);
+
+  Future<void> newDesign() => action(() async {
+    final name = await askText('Название макета', 'Новый макет');
+    if (name == null || name.trim().isEmpty || !mounted) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      workspace.create(createDesignDocument(name.trim()));
+      _resetGesture();
+    });
+    _saveWorkspaceSoon();
+  });
+
+  Future<void> renameDesign() => action(() async {
+    final name = await askText('Переименовать макет', document.name);
+    if (name == null || name.trim().isEmpty || !mounted) return;
+    document.name = name.trim();
+    changed();
+  });
+
+  Future<void> closeDesign(String id) => action(() async {
+    final tab = workspace.tabs.firstWhere((tab) => tab.id == id);
+    var discard = false;
+    if (tab.dirty) {
+      discard =
+          await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: Text('Закрыть «${tab.document.name}»?'),
+              content: const Text(
+                'Изменённый черновик будет удалён из вкладок. '
+                'Сохранённые шаблоны и последний подтверждённый отпечаток останутся.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Оставить'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Закрыть и удалить черновик'),
+                ),
+              ],
+            ),
+          ) ==
+          true;
+      if (!discard || !mounted) return;
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      if (workspace.tabs.length == 1) {
+        workspace.create(createDesignDocument('Новый макет'));
+      }
+      workspace.close(id, discardChanges: discard);
+      _resetGesture();
+    });
+    if (preview) refreshPreview();
+    _workspaceTimer?.cancel();
+    await _persistWorkspace();
+  });
 
   Future<void> _recordPrinted(LastPrintedJob job) async {
     final warning = await job.confirmed();
@@ -223,9 +381,9 @@ class _StudioPageState extends State<StudioPage>
     WidgetsBinding.instance.removeObserver(this);
     connection.dispose();
     ants.dispose();
-    previewTimer?.cancel();
-    previewImage?.dispose();
-    document.dispose();
+    _workspaceTimer?.cancel();
+    unawaited(_persistWorkspace());
+    workspace.dispose();
     printer.dispose();
     super.dispose();
   }
@@ -233,25 +391,33 @@ class _StudioPageState extends State<StudioPage>
   void changed() {
     setState(() => error = null);
     revision++;
+    activeTab.dirty = true;
+    activeTab.invalidatePreview();
+    _saveWorkspaceSoon();
     if (preview) refreshPreview();
   }
 
   void refreshPreview() {
-    final version = ++previewVersion;
-    previewTimer?.cancel();
-    previewTimer = Timer(const Duration(milliseconds: 80), () async {
+    final tab = activeTab;
+    final version = ++tab.previewVersion;
+    tab.previewTimer?.cancel();
+    tab.previewTimer = Timer(const Duration(milliseconds: 80), () async {
       try {
-        final next = await renderDesign(document);
-        if (!mounted || version != previewVersion) {
+        final next = await renderDesign(tab.document);
+        if (!mounted || tab.disposed || version != tab.previewVersion) {
           next.dispose();
           return;
         }
-        setState(() {
-          previewImage?.dispose();
-          previewImage = next;
-        });
+        tab.previewImage?.dispose();
+        tab.previewImage = next;
+        if (activeTab == tab) setState(() {});
       } catch (e) {
-        if (mounted) setState(() => error = '$e');
+        if (mounted &&
+            !tab.disposed &&
+            activeTab == tab &&
+            version == tab.previewVersion) {
+          setState(() => error = '$e');
+        }
       }
     });
   }
@@ -502,8 +668,18 @@ class _StudioPageState extends State<StudioPage>
     final saved = document.toJson();
     final next = templates.where((e) => e['name'] != document.name).toList()
       ..add(saved);
-    await printer.saveTemplates(jsonEncode(next));
-    if (mounted) setState(() => templates = next);
+    try {
+      await printer.saveTemplates(jsonEncode(next));
+    } catch (_) {
+      changed();
+      rethrow;
+    }
+    if (!mounted) return;
+    setState(() {
+      templates = next;
+      activeTab.dirty = false;
+    });
+    _saveWorkspaceSoon();
   });
   Future<void> open() => action(() async {
     final saved = await showDialog<Map<String, dynamic>>(
@@ -528,23 +704,17 @@ class _StudioPageState extends State<StudioPage>
       ),
     );
     if (saved == null || !mounted) return;
-    final next = LabelDocument.fromJson(saved);
-    try {
-      for (final element in next.elements) {
-        await element.prepare();
-      }
-    } catch (_) {
-      next.dispose();
-      rethrow;
-    }
+    final next = await prepareDocument(saved);
     if (!mounted) {
       next.dispose();
       return;
     }
-    document.dispose();
-    document = next;
-    selected = next.elements.firstOrNull;
-    changed();
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      workspace.create(next);
+      _resetGesture();
+    });
+    _saveWorkspaceSoon();
   });
   void mutateSelected(void Function(LabelElement) mutation) {
     if (busy || preview || selected == null) return;
@@ -553,11 +723,26 @@ class _StudioPageState extends State<StudioPage>
   }
 
   Future<void> prepareElement(LabelElement element) async {
+    final tab = activeTab;
     try {
       await element.prepare();
-      if (mounted && document.elements.contains(element)) changed();
+      if (!mounted ||
+          tab.disposed ||
+          !tab.document.elements.contains(element)) {
+        return;
+      }
+      tab.revision++;
+      tab.dirty = true;
+      tab.invalidatePreview();
+      if (activeTab == tab) {
+        setState(() {});
+        if (tab.preview) refreshPreview();
+      }
+      _saveWorkspaceSoon();
     } catch (e) {
-      if (mounted) setState(() => error = '$e');
+      if (mounted && !tab.disposed && activeTab == tab) {
+        setState(() => error = '$e');
+      }
     }
   }
 
@@ -612,6 +797,7 @@ class _StudioPageState extends State<StudioPage>
       preview = false;
       inspectorOpen = true;
     });
+    _saveWorkspaceSoon();
   }
 
   Widget editorWorkspace() => LayoutBuilder(
@@ -645,6 +831,7 @@ class _StudioPageState extends State<StudioPage>
                   onPressed: () {
                     FocusManager.instance.primaryFocus?.unfocus();
                     setState(() => inspectorOpen = false);
+                    _saveWorkspaceSoon();
                   },
                   icon: const Icon(Icons.close),
                 ),
@@ -667,8 +854,10 @@ class _StudioPageState extends State<StudioPage>
                           ButtonSegment(value: true, label: Text('Оригинал')),
                         ],
                         selected: {colorImages},
-                        onSelectionChanged: (value) =>
-                            setState(() => colorImages = value.single),
+                        onSelectionChanged: (value) {
+                          setState(() => colorImages = value.single);
+                          _saveWorkspaceSoon();
+                        },
                       ),
                       const SizedBox(height: 12),
                     ],
@@ -864,6 +1053,7 @@ class _StudioPageState extends State<StudioPage>
                         selected = entry.value;
                         preview = false;
                       });
+                      _saveWorkspaceSoon();
                       Navigator.pop(context);
                     },
             ),
@@ -945,6 +1135,7 @@ class _StudioPageState extends State<StudioPage>
                                   .where((element) => element.contains(point))
                                   .firstOrNull,
                             );
+                            _saveWorkspaceSoon();
                           },
                     onScaleStart: preview || busy
                         ? null
@@ -1061,6 +1252,7 @@ class _StudioPageState extends State<StudioPage>
                     onScaleEnd: (_) {
                       zoomingLabel = false;
                       activeHandle = pointerHandle = null;
+                      _saveWorkspaceSoon();
                     },
                     child: Stack(
                       clipBehavior: Clip.none,
@@ -1131,6 +1323,101 @@ class _StudioPageState extends State<StudioPage>
     return null;
   }
 
+  void _revealActiveDesign(double viewportWidth) {
+    final tab = activeTab;
+    final state = (tab.id, tab.document.name, tab.dirty, viewportWidth);
+    if (_tabRevealState == state) return;
+    _tabRevealState = state;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || activeTab != tab) return;
+      final target = GlobalObjectKey(tab).currentContext;
+      if (target != null) {
+        Scrollable.ensureVisible(target, alignment: .5);
+      }
+    });
+  }
+
+  Widget designTabs() => Container(
+    height: 52,
+    decoration: const BoxDecoration(
+      border: Border(bottom: BorderSide(color: StudioColors.border)),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              _revealActiveDesign(constraints.maxWidth);
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final tab in workspace.tabs)
+                      Padding(
+                        key: GlobalObjectKey(tab),
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Material(
+                          color: tab == activeTab
+                              ? StudioColors.border
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(8),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Tooltip(
+                                message:
+                                    '${tab.document.name}'
+                                    '${tab.dirty ? ' · изменённый черновик' : ''}',
+                                child: TextButton(
+                                  key: ValueKey('activate-${tab.id}'),
+                                  onPressed: busy
+                                      ? null
+                                      : () => activateTab(tab.id),
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 140,
+                                    ),
+                                    child: Text(
+                                      '${tab.dirty ? '• ' : ''}${tab.document.name}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                key: ValueKey('close-${tab.id}'),
+                                tooltip: 'Закрыть ${tab.document.name}',
+                                onPressed: busy
+                                    ? null
+                                    : () => closeDesign(tab.id),
+                                iconSize: 18,
+                                icon: const Icon(Icons.close),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        IconButton(
+          tooltip: 'Переименовать макет',
+          onPressed: busy ? null : renameDesign,
+          icon: const Icon(Icons.drive_file_rename_outline),
+        ),
+        IconButton(
+          tooltip: 'Новый макет',
+          onPressed: busy ? null : newDesign,
+          icon: const Icon(Icons.add),
+        ),
+      ],
+    ),
+  );
+
   Widget tool(IconData icon, String label, VoidCallback? onPressed) => SizedBox(
     width: 68,
     child: TextButton(
@@ -1193,6 +1480,7 @@ class _StudioPageState extends State<StudioPage>
                 : () {
                     setState(() => preview = !preview);
                     if (preview) refreshPreview();
+                    _saveWorkspaceSoon();
                   },
             icon: const Icon(Icons.visibility_outlined),
           ),
@@ -1204,6 +1492,15 @@ class _StudioPageState extends State<StudioPage>
             constraints: const BoxConstraints(maxWidth: 1120),
             child: Column(
               children: [
+                designTabs(),
+                if (_storageError != null)
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      _storageError!,
+                      style: const TextStyle(color: StudioColors.red),
+                    ),
+                  ),
                 if (busy || connection.busy)
                   const LinearProgressIndicator(minHeight: 2),
                 if (error != null)
@@ -1232,7 +1529,12 @@ class _StudioPageState extends State<StudioPage>
                       ],
                     ),
                   ),
-                Expanded(child: editorWorkspace()),
+                Expanded(
+                  child: KeyedSubtree(
+                    key: ValueKey('editor-${activeTab.id}'),
+                    child: editorWorkspace(),
+                  ),
+                ),
                 Container(
                   decoration: const BoxDecoration(
                     color: StudioColors.surface,
