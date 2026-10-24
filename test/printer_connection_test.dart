@@ -17,6 +17,9 @@ void main() {
   late PrinterClient printer;
   late PrinterConnectionController controller;
   late List<String> calls;
+  late List<bool> connectionPermissions;
+  var revokePermissionDuringConnect = false;
+  var nativePermissionRequests = 0;
   String? saved;
   var enabled = true;
   var permitted = true;
@@ -26,20 +29,25 @@ void main() {
   Object? connectFailure;
   Completer<void>? connectGate;
 
-  Future<void> disconnected() async {
+  Future<void> event(String method, [Object? arguments]) async {
     final delivered = Completer<void>();
     ServicesBinding.instance.channelBuffers.push(
       channel.name,
       const StandardMethodCodec().encodeMethodCall(
-        const MethodCall('disconnected'),
+        MethodCall(method, arguments),
       ),
       (_) => delivered.complete(),
     );
     await delivered.future;
   }
 
+  Future<void> disconnected() => event('disconnected');
+
   setUp(() {
     calls = [];
+    connectionPermissions = [];
+    revokePermissionDuringConnect = false;
+    nativePermissionRequests = 0;
     saved = goodAddress;
     enabled = true;
     permitted = true;
@@ -67,6 +75,14 @@ void main() {
           return enableResult;
         case 'connect':
           await connectGate?.future;
+          final requestPermission =
+              (call.arguments as Map)['requestPermission'] as bool? ?? true;
+          connectionPermissions.add(requestPermission);
+          if (revokePermissionDuringConnect) {
+            permitted = false;
+            if (requestPermission) nativePermissionRequests++;
+            throw PlatformException(code: 'permission_denied');
+          }
           if (connectFailure != null) throw connectFailure!;
           return null;
         case 'exchange':
@@ -110,6 +126,7 @@ void main() {
       expect(printer.connected, isTrue);
       await controller.restore();
       expect(calls.where((call) => call == 'connect'), hasLength(1));
+      expect(connectionPermissions, [false]);
     },
   );
 
@@ -158,6 +175,7 @@ void main() {
       enabled = false;
       await controller.enableAndReconnect();
       expect(controller.phase, PrinterConnectionPhase.connected);
+      expect(connectionPermissions, [false]);
       expect(
         calls.indexOf('requestEnableBluetooth'),
         lessThan(calls.indexOf('connect')),
@@ -176,6 +194,35 @@ void main() {
     expect(controller.phase, PrinterConnectionPhase.connected);
   });
 
+  testWidgets('declined enable cancels an already pending retry', (
+    tester,
+  ) async {
+    connectFailure = PlatformException(code: 'timeout');
+    await controller.restore();
+    enableResult = 'declined';
+    await controller.enableAndReconnect();
+    await tester.pump(const Duration(hours: 1));
+    expect(controller.phase, PrinterConnectionPhase.enableDeclined);
+    expect(calls.where((call) => call == 'connect'), hasLength(1));
+  });
+
+  testWidgets(
+    'opened settings suspends retries until returning to foreground',
+    (tester) async {
+      connectFailure = PlatformException(code: 'timeout');
+      await controller.restore();
+      enableResult = 'settings_opened';
+      await controller.enableAndReconnect();
+      await tester.pump(const Duration(minutes: 1));
+      expect(calls.where((call) => call == 'connect'), hasLength(1));
+      connectFailure = null;
+      controller.setForeground(false);
+      controller.setForeground(true);
+      await tester.pump();
+      expect(printer.connected, isTrue);
+    },
+  );
+
   test(
     'missing permission stays quiet until explicit connection action',
     () async {
@@ -191,6 +238,45 @@ void main() {
   );
 
   test(
+    'passive connect refuses a permission prompt after permission is revoked',
+    () async {
+      revokePermissionDuringConnect = true;
+      await controller.restore();
+      expect(controller.phase, PrinterConnectionPhase.permissionDenied);
+      expect(printer.connected, isFalse);
+      expect(connectionPermissions, [false]);
+      expect(nativePermissionRequests, 0);
+      expect(saved, goodAddress);
+
+      revokePermissionDuringConnect = false;
+      permitted = true;
+      final connected = Completer<void>();
+      void observe() {
+        if (controller.connected && !connected.isCompleted) {
+          connected.complete();
+        }
+      }
+
+      controller.addListener(observe);
+      try {
+        await event('adapterChanged', {
+          'available': true,
+          'enabled': true,
+          'permitted': true,
+        });
+        await connected.future.timeout(const Duration(seconds: 5));
+      } finally {
+        controller.removeListener(observe);
+      }
+      expect(printer.connected, isTrue);
+      expect(controller.phase, PrinterConnectionPhase.connected);
+      expect(connectionPermissions, [false, false]);
+      expect(nativePermissionRequests, 0);
+      expect(calls, isNot(contains('requestEnableBluetooth')));
+    },
+  );
+
+  test(
     'successful explicit connection refreshes previously missing permission',
     () async {
       permitted = false;
@@ -202,6 +288,7 @@ void main() {
       expect(controller.address, otherAddress);
       expect(saved, otherAddress);
       expect(printer.connected, isTrue);
+      expect(connectionPermissions, [true]);
     },
   );
 
@@ -216,16 +303,27 @@ void main() {
     expect(calls, isNot(contains('connect')));
   });
 
-  test(
-    'unreachable saved printer makes one attempt per restore, never loops',
-    () async {
+  testWidgets(
+    'unreachable saved printer retries passively and stops after handshake',
+    (tester) async {
       connectFailure = PlatformException(code: 'timeout');
       await controller.restore();
       expect(controller.phase, PrinterConnectionPhase.unreachable);
       expect(calls.where((call) => call == 'connect'), hasLength(1));
       expect(saved, goodAddress);
-      await controller.restore();
+      await tester.pump(const Duration(milliseconds: 2999));
+      expect(calls.where((call) => call == 'connect'), hasLength(1));
+      await tester.pump(const Duration(milliseconds: 1));
       expect(calls.where((call) => call == 'connect'), hasLength(2));
+      connectFailure = null;
+      await tester.pump(const Duration(seconds: 3));
+      expect(printer.connected, isTrue);
+      expect(controller.phase, PrinterConnectionPhase.connected);
+      await tester.pump(const Duration(hours: 1));
+      expect(calls.where((call) => call == 'connect'), hasLength(3));
+      expect(calls, isNot(contains('devices')));
+      expect(calls, isNot(contains('requestEnableBluetooth')));
+      expect(calls, isNot(contains('write')));
     },
   );
 
@@ -332,14 +430,32 @@ void main() {
   );
 
   test(
-    'transport disconnect updates listeners without reconnect or print replay',
+    'transport disconnect schedules reconnect without immediate IO or print replay',
     () async {
       await controller.restore();
+      final connected = Completer<void>();
+      void observe() {
+        if (controller.connected && !connected.isCompleted) {
+          connected.complete();
+        }
+      }
+
+      controller.addListener(observe);
       final before = calls.length;
       await disconnected();
       expect(printer.connected, isFalse);
       expect(controller.phase, PrinterConnectionPhase.disconnected);
       expect(calls.length, before);
+      try {
+        await connected.future.timeout(const Duration(seconds: 10));
+      } finally {
+        controller.removeListener(observe);
+      }
+      expect(printer.connected, isTrue);
+      expect(controller.phase, PrinterConnectionPhase.connected);
+      expect(calls.where((call) => call == 'connect'), hasLength(2));
+      expect(calls, isNot(contains('write')));
+      expect(calls, isNot(contains('requestEnableBluetooth')));
     },
   );
 

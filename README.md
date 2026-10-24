@@ -43,19 +43,26 @@ waits for `Наклеено — дальше`. Cancellation settles an in-flight
 an ambiguous failure stops the job without retrying or replaying it.
 
 The last printer address is saved only after a successful D110 handshake.
-Native launch/resume makes one passive reconnect attempt without prompting for
-missing permissions or replaying prints. Android offers the system Bluetooth
-enable request; desktop opens Bluetooth settings and provides return guidance.
-First-use connection obtains permission and Bluetooth enable before opening
-the picker. Declining leaves the editor usable without an error-only dialog.
-Missing adapters, denied permissions, cancelled requests and discovery errors
-have distinct recovery states.
+While the native app is resumed, launch, return, adapter restoration and idle
+transport loss reconnect that saved printer. Transient failures retry without
+a count limit, three seconds after the previous attempt finishes. Printer I/O
+remains single-flight. Opening a device picker pauses new passive attempts;
+discovery waits for active controller I/O. Unrelated editor actions remain
+available. `Отключить` pauses recovery until an explicit connection or the next
+foreground resume. Backgrounding cancels the timer and lets existing I/O settle.
+Missing permissions, disabled/unavailable Bluetooth, unsupported models and
+storage failures stop the current retry cycle; passive connection cannot open
+a permission prompt, enable Bluetooth or replay a print.
+
+Android offers the system Bluetooth enable request; desktop opens Bluetooth
+settings and provides return guidance. First-use connection obtains permission
+and Bluetooth enable before opening the picker. Declining leaves the editor
+usable without an error-only dialog. Recovery states remain distinct.
 
 Android, Linux/BlueZ and Windows monitor adapter changes without polling.
-Known power loss updates the foreground connection state without waiting for
-resume. Power restoration schedules one saved-printer reconnect after active
-I/O settles; interrupted prints are never replayed. Late discovery or handshake
-replies cannot override a newer power-loss event.
+Known power loss updates the connection state without waiting for resume.
+Power restoration resumes saved-printer recovery after active I/O settles;
+late discovery or handshake replies cannot override a newer power-loss event.
 
 An inspection failure reports unknown power, not a false Bluetooth-off state,
 and preserves a potentially healthy transport. Explicit permission refusal
