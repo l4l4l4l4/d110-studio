@@ -342,6 +342,7 @@ struct DeviceBridge::Impl {
       if (slot && *slot == "lastPrinted") request.path = L"last-printed.json";
       else if (slot && *slot == "workspace") request.path = L"workspace.json";
       else if (slot && *slot == "mediaProfile") request.path = L"media-profile.json";
+      else if (slot && *slot == "mediaCalibration") request.path = L"media-calibration.json";
       else {
         error.Error("invalid_argument", "Unknown state slot", ERROR_INVALID_PARAMETER);
         Respond(request.result, std::move(error));

@@ -1,0 +1,20 @@
+{
+  "schema": "pohuy.ai-evidence/v1",
+  "covenant": "POHUY-COVENANT-1.0",
+  "submission_id": "d110-guided-camera-calibration",
+  "skill": {
+    "name": "pohuy",
+    "sha256": "813aacb4172223d0b857a4b1d9988efb0d58052c183b04dd6de56241bdb09de8"
+  },
+  "transcript": {
+    "sha256": "cff39f41d25c5e635e3aa0c31cae840d84380daf4e6aac894f8c461598fe91fa",
+    "capture_level": "relevant-message-excerpt"
+  },
+  "git": {
+    "code_tree": "239648001f7b2235e6f258e388000111dfa4cfce"
+  },
+  "canonical": {
+    "repository": "https://github.com/l4l4l4l4/POHUY-LICENSE",
+    "commit": "d3686738cf73236b84da93e0981d6e0f61b37747"
+  }
+}

@@ -1,0 +1,5 @@
+pohuy skill loaded: the pinned canonical pohuy skill and references were loaded.
+agent committed: this statement applies to the agent-created commit containing this bundle, once that commit exists.
+pohuy communication only: contribution communication used the active pohuy skill.
+
+The transcript is an explicitly limited relevant-message excerpt, not a complete harness recording. Commit signing and publication must be verified independently. UI acceptance is not a claim of native camera, Bluetooth or physical-label verification.

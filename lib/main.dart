@@ -338,6 +338,13 @@ class _StudioPageState extends State<StudioPage>
       initial: target.media,
       canPrint:
           native && printer.connected && !printer.busy && !connection.busy,
+      canPrintNow: () =>
+          native && printer.connected && !printer.busy && !connection.busy,
+      printerChanges: Listenable.merge([printer, connection]),
+      pickImage: () => pickStudioImage(printer),
+      readSession: () => stateStore.read(AppStateSlot.mediaCalibration),
+      saveSession: (json) =>
+          stateStore.write(AppStateSlot.mediaCalibration, json),
       printPattern: (raster) =>
           printer.printRaster(raster.packed, raster.height, density: 1),
       saveProfile: (profile) async {
