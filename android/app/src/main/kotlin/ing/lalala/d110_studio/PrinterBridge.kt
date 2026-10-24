@@ -793,6 +793,7 @@ class PrinterBridge(
             "lastPrinted" -> "last-printed.json"
             "workspace" -> "workspace.json"
             "mediaProfile" -> "media-profile.json"
+            "mediaCalibration" -> "media-calibration.json"
             else -> throw BridgeFailure("invalid_arguments", "Unknown state slot")
         }
         return AtomicFile(File(activity.filesDir, filename))

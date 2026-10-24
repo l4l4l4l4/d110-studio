@@ -93,13 +93,31 @@ seams show the physical paper; amber areas outside the head cannot print.
 Rendering clips every tile to its rounded paper/head intersection without
 rescaling the artwork. Hidden source ink remains available for later editing.
 
-`Калибровка ленты` prints a reference with labelled dot-centre fiducials,
-accepts measured geometry, then prints a separate verification pattern.
-The reference coordinates remain bound to the pattern actually acknowledged,
-even if the draft length changes afterward. The live geometry diagram remains
-visible while editing measurements. Saving a measured profile requires both
-acknowledged patterns and explicit visual confirmation; a rendered preview or
-an offline save cannot mark a roll as calibrated.
+`Калибровка ленты` is a five-step wizard: reference, photograph, contour review,
+verification print, and explicit visual confirmation. The short reference is
+80 × 96 dots with fixed dot-centre fiducials and ruler phase. An existing matching
+reference can be explicitly reused without printing another label.
+
+The embedded rear camera takes a still photo only on the shutter button; photo
+import remains an alternative. Photograph the whole label on a dark background.
+Camera-owned temporary files and Blob URLs are released after reading or a
+cancelled shutter; gallery/import sources are never deleted.
+Geometry is calculated locally, including rounded corners and signed head/feed
+offsets. Ambiguous automatic marks require four ordered manual taps; missing
+paper edges or insufficient image quality are rejected, not guessed. The contour
+is overlaid on the photograph; optional numeric corrections remain secondary.
+
+Local session state retains the photo, frozen reference coordinates, draft and
+pending print outcome across closing or interruption. Reopening never prints
+automatically. An uncertain acknowledgement requires inspection and explicit
+consent before another print; failed storage cannot cause a print replay.
+An uncertain verification disables Back to preserve its pending-print guard;
+closing remains safe and another attempt still requires consent. Lifecycle saves
+cannot overwrite an in-flight transition with an older session snapshot.
+Geometry changes invalidate verification without changing the original reference
+scale. A calibrated profile requires an acknowledged or explicitly reused
+reference, an acknowledged verification print and explicit visual confirmation.
+A photograph, rendered preview or offline save alone cannot calibrate a roll.
 
 The saved roll becomes the default for new designs. Existing designs retain
 their embedded geometry until the saved profile is explicitly applied. Repeat

@@ -5,7 +5,7 @@ import 'app_state_storage_native.dart'
     if (dart.library.js_interop) 'app_state_storage_web.dart'
     as storage;
 
-enum AppStateSlot { lastPrinted, workspace, mediaProfile }
+enum AppStateSlot { lastPrinted, workspace, mediaProfile, mediaCalibration }
 
 /// Private durable JSON slots, separate from templates and printer selection.
 /// Missing files return null; malformed data and storage failures are errors.

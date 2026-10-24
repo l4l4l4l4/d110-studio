@@ -1,0 +1,11 @@
+# Guided in-app media calibration
+
+The owner requested a short sequential calibration experience and taking the reference photo directly in the app, without sending photos to chat. The owner accepted the new wizard UI before independent review.
+
+The patch replaces the initial numeric form with reference, photo, contour review, verification-print and visual-confirmation steps. Existing matching references can be explicitly reused. The embedded camera and gallery alternative feed bounded local photo/CV processing, automatic rounded-paper geometry and ordered manual corrections. Numeric controls remain optional. Durable session state survives interruption; pending print markers precede submission, lifecycle writes cannot overwrite active transitions, ambiguous outcomes require explicit repeat consent, and Back cannot discard uncertain verification. Camera-owned temporary files/Blob URLs are released even after cancellation; imported sources are not deleted.
+
+Changed UI, camera/CV/session modules, native storage allowlists, dependencies and README implement that workflow. Standalone formatting/analysis and all 203 tests passed, including reproduced persistence/Back/capture-retention regressions and a real packed-reference-to-photo geometry pipeline. After clean integration above the signed reconnect commit, the cumulative check passed all 233 tests with clean formatting/analysis and a successful release Web build. Independent code and security review found no remaining blockers. Actual browser smoke covered import, automatic/manual contour, reduced viewport, progress restoration and the integrated explicit offline verification gate. Separate real-file and compiled-Dart browser smokes proved owned-file deletion and Blob revocation without camera activation; throwaway runners were removed.
+
+Synthetic photo dimensions are not measurements of the owner’s roll. No stock radius, reliable QR density or actual camera/physical verification is claimed; those require the signed Android APK and physical acceptance. The first existing reference must be reused, never automatically reprinted.
+
+The transcript is a limited relevant-message excerpt, not a complete harness capture. The checker validates form/digests rather than client honesty; signing and publication are independently observable.
