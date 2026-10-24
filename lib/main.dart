@@ -186,7 +186,12 @@ class _StudioPageState extends State<StudioPage>
     selected = document.elements.first;
     unawaited(_restoreWorkspace());
     if (native) unawaited(_loadTemplates());
-    if (native) unawaited(connection.restore());
+    if (native) {
+      connection.setForeground(
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+      );
+      unawaited(connection.restore());
+    }
   }
 
   void _connectionChanged() {
@@ -195,8 +200,8 @@ class _StudioPageState extends State<StudioPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (native && state == AppLifecycleState.resumed && !busy) {
-      unawaited(connection.restore());
+    if (native) {
+      connection.setForeground(state == AppLifecycleState.resumed);
     }
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
@@ -478,7 +483,7 @@ class _StudioPageState extends State<StudioPage>
   }
 
   Future<void> action(Future<void> Function() operation) async {
-    if (busy || connection.busy) return;
+    if (busy) return;
     setState(() {
       busy = true;
       error = null;
@@ -621,32 +626,42 @@ class _StudioPageState extends State<StudioPage>
     changed();
   });
   Future<void> connect() => action(() async {
-    if (connection.phase == PrinterConnectionPhase.permissionRequired) {
-      await connection.enableAndReconnect();
-      if (!mounted ||
-          connection.phase != PrinterConnectionPhase.selectPrinter) {
-        return;
+    var pickerOpen = true;
+    connection.setSelectingPrinter(true);
+    try {
+      if (connection.phase == PrinterConnectionPhase.permissionRequired) {
+        await connection.enableAndReconnect();
+        if (!mounted ||
+            connection.phase != PrinterConnectionPhase.selectPrinter) {
+          return;
+        }
       }
-    }
-    Future<void> discoveryFinished = Future.value();
-    Future<List<PrinterDevice>> discover() {
-      final request = connection.discover();
-      // The dialog displays search errors; cancellation still waits for the
-      // native request to release the client's single-flight lock.
-      discoveryFinished = request.then<void>(
-        (_) {},
-        onError: (Object error, StackTrace stack) {},
-      );
-      return request;
-    }
+      Future<void> discoveryFinished = Future.value();
+      Future<List<PrinterDevice>> discover() {
+        final request = connection.discover(
+          isCurrent: () => pickerOpen && mounted,
+        );
+        // The dialog displays search errors; cancellation still waits for the
+        // native request to release the client's single-flight lock.
+        discoveryFinished = request.then<void>(
+          (_) {},
+          onError: (Object error, StackTrace stack) {},
+        );
+        return request;
+      }
 
-    final address = await showDialog<String>(
-      context: context,
-      builder: (context) => DeviceDialog(discover: discover),
-    );
-    await discoveryFinished;
-    if (address == null || !mounted) return;
-    await connection.connect(address);
+      final address = await showDialog<String>(
+        context: context,
+        builder: (context) => DeviceDialog(discover: discover),
+      );
+      pickerOpen = false;
+      await discoveryFinished;
+      if (address == null || !mounted) return;
+      await connection.connect(address);
+    } finally {
+      pickerOpen = false;
+      connection.setSelectingPrinter(false);
+    }
   });
   int density = 2;
   Future<void> print() => action(() async {
@@ -1874,7 +1889,7 @@ class _StudioPageState extends State<StudioPage>
                         child: OutlinedButton.icon(
                           onPressed: native && !busy && !connection.busy
                               ? (printer.connected
-                                    ? () => action(printer.disconnect)
+                                    ? () => action(connection.disconnect)
                                     : (connection.phase ==
                                               PrinterConnectionPhase
                                                   .bluetoothOff ||

@@ -14,6 +14,7 @@ Finder labelPaint() => find.byWidgetPredicate(
 Finder gestureSurface() => find.byKey(const ValueKey('label-gesture'));
 
 Future<LabelPainter> openEditor(WidgetTester tester, Size viewport) async {
+  tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = viewport;
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -50,6 +51,100 @@ Offset rendered(RenderBox box, LabelPainter painter, Offset labelPoint) {
 }
 
 void main() {
+  testWidgets(
+    'explicit disconnect stays disconnected until foreground resume',
+    (tester) async {
+      await openEditor(tester, const Size(420, 900));
+      const channel = MethodChannel('d110_studio/device');
+      const address = 'AA:BB:CC:DD:EE:01';
+      var attempts = 0;
+      Completer<void>? disconnectGate;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        switch (call.method) {
+          case 'lastPrinterAddress':
+            return address;
+          case 'adapterState':
+            return {'available': true, 'enabled': true, 'permitted': true};
+          case 'connect':
+            attempts++;
+            return null;
+          case 'disconnect':
+            await disconnectGate?.future;
+            return null;
+          case 'exchange':
+            return Uint8List.fromList('D110'.codeUnits);
+          default:
+            return null;
+        }
+      });
+      final dynamic page = tester.state(find.byType(StudioPage));
+      final connection = page.connection as PrinterConnectionController;
+      try {
+        unawaited(connection.restore());
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(connection.connected, isTrue);
+        await tester.tap(find.widgetWithText(OutlinedButton, 'Отключить'));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(connection.connected, isFalse);
+        await tester.pump(const Duration(seconds: 30));
+        expect(connection.connected, isFalse);
+        expect(attempts, 1);
+        for (final enabled in [false, true]) {
+          tester.binding.channelBuffers.push(
+            channel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('adapterChanged', {
+                'available': true,
+                'enabled': enabled,
+                'permitted': true,
+              }),
+            ),
+            (_) {},
+          );
+          await tester.pump(const Duration(milliseconds: 400));
+        }
+        expect(connection.phase, PrinterConnectionPhase.disconnected);
+        expect(attempts, 1);
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await tester.pump();
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(connection.connected, isTrue);
+        expect(attempts, 2);
+        disconnectGate = Completer<void>();
+        await tester.tap(find.widgetWithText(OutlinedButton, 'Отключить'));
+        await tester.pump();
+        tester.binding.channelBuffers.push(
+          channel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('adapterChanged', {
+              'available': true,
+              'enabled': false,
+              'permitted': true,
+            }),
+          ),
+          (_) {},
+        );
+        await tester.pump();
+        expect(connection.phase, PrinterConnectionPhase.bluetoothOff);
+        disconnectGate.complete();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(connection.phase, PrinterConnectionPhase.bluetoothOff);
+        expect(connection.connected, isFalse);
+      } finally {
+        if (disconnectGate case final gate? when !gate.isCompleted) {
+          gate.complete();
+          await tester.pump();
+        }
+        await tester.pumpWidget(const SizedBox());
+      }
+    },
+  );
+
   testWidgets('manual printer selection survives connection-state updates', (
     tester,
   ) async {
@@ -98,6 +193,136 @@ void main() {
       }
       await tester.pump(const Duration(milliseconds: 300));
       await operation;
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  testWidgets('manual printer picker pauses automatic reconnection', (
+    tester,
+  ) async {
+    await openEditor(tester, const Size(420, 900));
+    const channel = MethodChannel('d110_studio/device');
+    const oldAddress = 'AA:BB:CC:DD:EE:01';
+    const newAddress = 'AA:BB:CC:DD:EE:02';
+    var saved = oldAddress;
+    final attempts = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      switch (call.method) {
+        case 'lastPrinterAddress':
+          return saved;
+        case 'adapterState':
+          return {'available': true, 'enabled': true, 'permitted': true};
+        case 'devices':
+          return [
+            {
+              'name': 'D110 second',
+              'address': newAddress,
+              'classic': true,
+              'spp': true,
+            },
+          ];
+        case 'connect':
+          final address = (call.arguments as Map)['address'] as String;
+          attempts.add(address);
+          if (address == oldAddress) throw PlatformException(code: 'timeout');
+          return null;
+        case 'exchange':
+          return Uint8List.fromList('D110'.codeUnits);
+        case 'saveLastPrinterAddress':
+          saved = (call.arguments as Map)['address'] as String;
+          return null;
+        default:
+          return null;
+      }
+    });
+    final dynamic page = tester.state(find.byType(StudioPage));
+    final connection = page.connection as PrinterConnectionController;
+    unawaited(connection.restore());
+    await tester.pump();
+    expect(attempts, [oldAddress]);
+    final operation = page.connect() as Future<void>;
+    try {
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(seconds: 20));
+      expect(attempts, [oldAddress]);
+      await tester.tap(find.widgetWithText(ListTile, 'D110 second'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await operation;
+      expect(saved, newAddress);
+      expect(connection.phase, PrinterConnectionPhase.connected);
+      expect(attempts, [oldAddress, newAddress]);
+    } finally {
+      final picker = find.byType(DeviceDialog);
+      if (picker.evaluate().isNotEmpty) {
+        Navigator.of(tester.element(picker)).pop();
+      }
+      await tester.pump(const Duration(milliseconds: 400));
+      await operation;
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  testWidgets('editing text works while a passive connection is pending', (
+    tester,
+  ) async {
+    await openEditor(tester, const Size(420, 900));
+    const channel = MethodChannel('d110_studio/device');
+    final gate = Completer<void>();
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      switch (call.method) {
+        case 'lastPrinterAddress':
+          return 'AA:BB:CC:DD:EE:01';
+        case 'adapterState':
+          return {'available': true, 'enabled': true, 'permitted': true};
+        case 'connect':
+          await gate.future;
+          return null;
+        case 'exchange':
+          return Uint8List.fromList('D110'.codeUnits);
+        default:
+          return null;
+      }
+    });
+    final dynamic page = tester.state(find.byType(StudioPage));
+    final restoring = (page.connection as PrinterConnectionController)
+        .restore();
+    await tester.pump();
+    expect((page.connection as PrinterConnectionController).busy, isTrue);
+    final adding = page.add(ElementKind.text) as Future<void>;
+    try {
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(TextFormField), findsOneWidget);
+      await tester.enterText(find.byType(TextFormField), 'Offline editing');
+      await tester.tap(find.widgetWithText(FilledButton, 'Сохранить'));
+      for (var i = 0; i < 100; i++) {
+        await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+        await tester.pump(const Duration(milliseconds: 20));
+        if ((page.document as LabelDocument).elements.any(
+          (element) => element.text == 'Offline editing',
+        )) {
+          break;
+        }
+      }
+      expect(
+        (page.document as LabelDocument).elements.where(
+          (element) => element.text == 'Offline editing',
+        ),
+        hasLength(1),
+      );
+      expect((page.connection as PrinterConnectionController).busy, isTrue);
+    } finally {
+      final dialog = find.byType(AlertDialog);
+      if (dialog.evaluate().isNotEmpty) {
+        Navigator.of(tester.element(dialog)).pop();
+      }
+      gate.complete();
+      await tester.pump(const Duration(milliseconds: 400));
+      await restoring;
+      await adding;
       await tester.pumpWidget(const SizedBox());
     }
   });

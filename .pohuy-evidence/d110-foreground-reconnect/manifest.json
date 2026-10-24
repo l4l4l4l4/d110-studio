@@ -1,0 +1,20 @@
+{
+  "schema": "pohuy.ai-evidence/v1",
+  "covenant": "POHUY-COVENANT-1.0",
+  "submission_id": "d110-foreground-reconnect",
+  "skill": {
+    "name": "pohuy",
+    "sha256": "813aacb4172223d0b857a4b1d9988efb0d58052c183b04dd6de56241bdb09de8"
+  },
+  "transcript": {
+    "sha256": "d6e4433693293ea348fb491e8dbb154021ef6b61438bca3f2c004294b8dbcd07",
+    "capture_level": "relevant-message-excerpt"
+  },
+  "git": {
+    "code_tree": "b6407f7831cb58dbf34f83df55f4804826dec762"
+  },
+  "canonical": {
+    "repository": "https://github.com/l4l4l4l4/POHUY-LICENSE",
+    "commit": "d3686738cf73236b84da93e0981d6e0f61b37747"
+  }
+}

@@ -189,7 +189,10 @@ class PrinterBridge(
                     if (!BluetoothAdapter.checkBluetoothAddress(address)) {
                         throw BridgeFailure("invalid_address", "Invalid Bluetooth address")
                     }
-                    withBluetoothPermissions(false, reply) {
+                    withBluetoothPermissions(
+                        false, reply,
+                        requestPermission = call.argument<Boolean>("requestPermission") != false,
+                    ) {
                         submit(reply, disconnectOnError = true) {
                             connect(address)
                             null
@@ -301,7 +304,12 @@ class PrinterBridge(
         }
     }
 
-    private fun withBluetoothPermissions(discovery: Boolean, reply: Reply, action: () -> Unit) {
+    private fun withBluetoothPermissions(
+        discovery: Boolean,
+        reply: Reply,
+        requestPermission: Boolean = true,
+        action: () -> Unit,
+    ) {
         val required = when {
             Build.VERSION.SDK_INT >= 31 -> arrayOf(
                 Manifest.permission.BLUETOOTH_CONNECT,
@@ -316,6 +324,10 @@ class PrinterBridge(
         }.toTypedArray()
         if (missing.isEmpty()) {
             action()
+            return
+        }
+        if (!requestPermission) {
+            reply.error("permission_denied", "Bluetooth permission is required")
             return
         }
         if (pendingPermission != null) {

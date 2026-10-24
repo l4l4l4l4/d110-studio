@@ -284,7 +284,10 @@ class PrinterClient extends ChangeNotifier {
         };
       });
 
-  Future<void> connect(String address) => _singleFlight(() async {
+  Future<void> connect(
+    String address, {
+    bool requestPermission = true,
+  }) => _singleFlight(() async {
     final normalized = address.trim().toUpperCase();
     if (!RegExp(r'^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$').hasMatch(normalized)) {
       throw const PrinterException(
@@ -317,7 +320,10 @@ class PrinterClient extends ChangeNotifier {
         );
       }
       final generation = _disconnectGeneration;
-      await _channel.invokeMethod<void>('connect', {'address': normalized});
+      await _channel.invokeMethod<void>('connect', {
+        'address': normalized,
+        'requestPermission': requestPermission,
+      });
       _requireActive();
       await _readModel();
       if (generation != _disconnectGeneration) {
