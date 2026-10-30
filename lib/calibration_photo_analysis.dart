@@ -34,6 +34,57 @@ class CalibrationPhotoAnalysis {
   final double edgeErrorDots;
 }
 
+/// The same integer luminance used for detection and photo adjustment.
+int calibrationLuma(int red, int green, int blue) =>
+    (77 * red + 150 * green + 29 * blue) >> 8;
+
+class CalibrationPhotoInspection {
+  const CalibrationPhotoInspection({
+    required this.maskRgba,
+    required this.inkThreshold,
+    required this.paperThreshold,
+    required this.analysis,
+    required this.guidance,
+  });
+
+  final Uint8List maskRgba;
+  final double? inkThreshold;
+  final double? paperThreshold;
+  final CalibrationPhotoAnalysis? analysis;
+  final String? guidance;
+}
+
+/// Inspects the detector's actual paper/ink mask, optionally measuring it.
+/// Only rejected image content becomes guidance; invalid inputs still throw.
+CalibrationPhotoInspection inspectCalibrationPhoto(
+  Uint8List rgba,
+  int width,
+  int height, {
+  required int referenceRows,
+  bool measure = true,
+}) {
+  _validatePhotoInput(rgba, width, height, referenceRows);
+  final image = _PhotoPixels(rgba, width, height);
+  CalibrationPhotoAnalysis? analysis;
+  String? guidance;
+  try {
+    image.segment();
+    final paper = image.findPaper();
+    if (measure) {
+      analysis = _analyzePhotoPixels(image, paper, referenceRows, null);
+    }
+  } on FormatException catch (error) {
+    guidance = error.message;
+  }
+  return CalibrationPhotoInspection(
+    maskRgba: image.maskRgba(),
+    inkThreshold: image.segmented ? image.threshold : null,
+    paperThreshold: image.segmented ? image.paperThreshold : null,
+    analysis: analysis,
+    guidance: guidance,
+  );
+}
+
 /// Measures the printed cross centres and the *whole* paper contour.
 ///
 /// X is printer feed, Y is the 96-dot head. The known cross separations supply
@@ -52,6 +103,18 @@ CalibrationPhotoAnalysis analyzeCalibrationPhoto(
   required int referenceRows,
   List<CalibrationPhotoPoint>? fiducials,
 }) {
+  _validatePhotoInput(rgba, width, height, referenceRows);
+  final image = _PhotoPixels(rgba, width, height)..segment();
+  final paper = image.findPaper();
+  return _analyzePhotoPixels(image, paper, referenceRows, fiducials);
+}
+
+void _validatePhotoInput(
+  Uint8List rgba,
+  int width,
+  int height,
+  int referenceRows,
+) {
   if (width < 64 ||
       height < 64 ||
       width > 1800 ||
@@ -63,8 +126,14 @@ CalibrationPhotoAnalysis analyzeCalibrationPhoto(
   if (referenceRows < 48 || referenceRows > 1200) {
     _fail('Сначала напечатайте эталон заново.');
   }
-  final image = _PhotoPixels(rgba, width, height);
-  final paper = image.findPaper();
+}
+
+CalibrationPhotoAnalysis _analyzePhotoPixels(
+  _PhotoPixels image,
+  _Paper paper,
+  int referenceRows,
+  List<CalibrationPhotoPoint>? fiducials,
+) {
   final rasterMarks = _rasterMarks(referenceRows);
   final chosen = fiducials == null
       ? _selectMarks(image, rasterMarks, referenceRows)
@@ -187,15 +256,16 @@ class _PhotoPixels {
     : gray = Uint8List(width * height),
       region = Uint8List(width * height),
       queue = Int32List(width * height) {
-    final histogram = Int32List(256);
-    var transparent = 0;
     for (var i = 0; i < gray.length; i++) {
       final k = i * 4;
-      final value = (77 * rgba[k] + 150 * rgba[k + 1] + 29 * rgba[k + 2]) >> 8;
+      final value = calibrationLuma(rgba[k], rgba[k + 1], rgba[k + 2]);
       gray[i] = value;
       histogram[value]++;
       if (rgba[k + 3] < 250) transparent++;
     }
+  }
+
+  void segment() {
     if (transparent > gray.length ~/ 100) {
       _fail('Нужно непрозрачное фото бумаги.');
     }
@@ -261,13 +331,14 @@ class _PhotoPixels {
     // Specular background highlights belong outside the paper even when they
     // exceed the ink cut. Precise edges are localized separately below.
     final highlights = clusters(cut.floor() + 1);
-    final paperThreshold =
+    paperThreshold =
         highlights != null && highlights.light - highlights.dark >= 25
         ? (highlights.dark + highlights.light) / 2
         : cut;
     for (var i = 0; i < gray.length; i++) {
       region[i] = gray[i] > paperThreshold ? 1 : 0;
     }
+    segmented = true;
   }
 
   final int width, height;
@@ -276,6 +347,34 @@ class _PhotoPixels {
   final Int32List queue;
   late final double threshold;
   late final Uint8List interior;
+  final histogram = Int32List(256);
+  var transparent = 0;
+  late final double paperThreshold;
+  var segmented = false;
+  var hasInterior = false;
+
+  bool isInk(int pixel) => gray[pixel] < threshold;
+
+  Uint8List maskRgba() {
+    final mask = Uint8List(gray.length * 4);
+    for (var pixel = 0; pixel < gray.length; pixel++) {
+      // Until a contour exists, bright candidates are visible but dark pixels
+      // cannot truthfully be called ink. No threshold is invented on failure.
+      final value = hasInterior
+          ? interior[pixel] != 0
+                ? isInk(pixel)
+                      ? 0
+                      : 255
+                : 72
+          : segmented && gray[pixel] > paperThreshold
+          ? 255
+          : 72;
+      final i = pixel * 4;
+      mask[i] = mask[i + 1] = mask[i + 2] = value;
+      mask[i + 3] = 255;
+    }
+    return mask;
+  }
 
   int _flood(int seed, int from, int to, {bool diagonal = false}) {
     var used = 1;
@@ -423,6 +522,7 @@ class _PhotoPixels {
         interior.fillRange(y * width + start, y * width + end, 1);
       }
     }
+    hasInterior = true;
     return _Paper(hull);
   }
 
@@ -460,7 +560,7 @@ class _PhotoPixels {
 
   List<_Mark> marks() {
     for (var i = 0; i < region.length; i++) {
-      region[i] = interior[i] != 0 && gray[i] < threshold ? 1 : 0;
+      region[i] = interior[i] != 0 && isInk(i) ? 1 : 0;
     }
     final found = <_Mark>[];
     for (var seed = 0; seed < region.length; seed++) {

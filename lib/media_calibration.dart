@@ -532,6 +532,7 @@ class _MediaCalibrationState extends State<_MediaCalibration>
         bytes = await captureCalibrationPhoto(
           context,
           pickImage: widget.pickImage ?? () async => null,
+          referenceRows: session.referenceRows,
         );
       }
       if (bytes == null || !mounted) return;

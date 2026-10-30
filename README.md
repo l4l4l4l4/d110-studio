@@ -120,10 +120,18 @@ reused without printing another label. Back permits another guarded reference
 print instead of leaving the wizard stuck.
 
 The embedded rear camera opens immediately after the reference acknowledgement
-or explicit reuse. Its torch toggle lights the scene while composing; the
-shutter takes the still photo. Photo import remains an alternative. Cancelling
-the camera preserves the reference for another attempt. Photograph the whole
-label on a dark background.
+or explicit reuse. The default live view shows the detector's actual paper/ink
+mask, rejection guidance, and measured contour/crosses when detection succeeds;
+adjusted grayscale and original views remain available. Brightness and contrast
+sliders use the same transform for live frames and the returned captured or
+imported photograph. Native camera EV is queried from the device and applied
+before capture. The torch control is on/off, not a simulated strength slider;
+the tested Redmi Note 10 Pro driver advertises only one torch strength level.
+Stream processing is single-flight with a 500 ms frame throttle,
+with bounded image dimensions; unsupported streaming explicitly falls back to
+the original preview. Live measurements are guidance, not calibration approval:
+the still photograph is measured separately. Cancelling preserves the reference
+for another attempt. Photograph the whole label on a dark background.
 Camera-owned temporary files and Blob URLs are released after reading or a
 cancelled shutter; gallery/import sources are never deleted.
 Geometry is calculated locally, including rounded corners and signed head/feed

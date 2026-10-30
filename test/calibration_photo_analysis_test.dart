@@ -2,9 +2,182 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:d110_studio/calibration_photo_analysis.dart';
+import 'package:d110_studio/calibration_processing.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'inspection and measurement share segmentation and real contour pixels',
+    () {
+      final photo = _Photo(
+        rows: 80,
+        thickMarks: true,
+        ink: 150,
+        glare: true,
+        matrix: [0, -2.2, 700, 2.2, 0, 220, 0, 0, 1],
+      );
+      final rgba = _blur(photo, 2);
+      final maskOnly = inspectCalibrationPhoto(
+        rgba,
+        photo.width,
+        photo.height,
+        referenceRows: photo.rows,
+        measure: false,
+      );
+      final inspected = inspectCalibrationPhoto(
+        rgba,
+        photo.width,
+        photo.height,
+        referenceRows: photo.rows,
+      );
+      final measured = analyzeCalibrationPhoto(
+        rgba,
+        photo.width,
+        photo.height,
+        referenceRows: photo.rows,
+      );
+      expect(inspected.guidance, isNull);
+      expect(inspected.maskRgba, maskOnly.maskRgba);
+      expect(inspected.inkThreshold, maskOnly.inkThreshold);
+      expect(inspected.paperThreshold, maskOnly.paperThreshold);
+      expect(
+        inspected.paperThreshold,
+        greaterThanOrEqualTo(inspected.inkThreshold!),
+      );
+      final analysis = inspected.analysis!;
+      _expectGeometry(analysis, photo);
+      expect(analysis.lengthMm, measured.lengthMm);
+      expect(analysis.widthMm, measured.widthMm);
+      expect(analysis.radiusMm, measured.radiusMm);
+      expect(
+        [
+          for (final p in analysis.paperOutline) [p.x, p.y],
+        ],
+        [
+          for (final p in measured.paperOutline) [p.x, p.y],
+        ],
+      );
+      var inkPixels = 0, paperPixels = 0, mutedPixels = 0;
+      for (var i = 0; i < rgba.length; i += 4) {
+        switch (inspected.maskRgba[i]) {
+          case 0:
+            expect(rgba[i], lessThan(inspected.inkThreshold!));
+            inkPixels++;
+          case 255:
+            expect(rgba[i], greaterThanOrEqualTo(inspected.inkThreshold!));
+            paperPixels++;
+          default:
+            mutedPixels++;
+        }
+      }
+      expect(inkPixels, greaterThan(100));
+      expect(paperPixels, greaterThan(2000));
+      expect(mutedPixels, greaterThan(2000));
+    },
+  );
+
+  test('identity transform retains detector thresholds and exact geometry', () {
+    final photo = _Photo();
+    // A colored image whose red channel differs from detector luminance.
+    final colored = Uint8List.fromList(photo.rgba);
+    for (var i = 0; i < colored.length; i += 4) {
+      colored[i] = (colored[i] + 12).clamp(0, 255).toInt();
+      colored[i + 2] = (colored[i + 2] - 12).clamp(0, 255).toInt();
+    }
+    final gray = adjustCalibrationRgba(
+      colored,
+      photo.width,
+      photo.height,
+      const CalibrationImageSettings(),
+    );
+    final before = inspectCalibrationPhoto(
+      colored,
+      photo.width,
+      photo.height,
+      referenceRows: photo.rows,
+    );
+    final after = inspectCalibrationPhoto(
+      gray,
+      photo.width,
+      photo.height,
+      referenceRows: photo.rows,
+    );
+    expect(before.guidance, isNull);
+    expect(after.guidance, isNull);
+    expect(before.maskRgba, after.maskRgba);
+    expect(before.inkThreshold, after.inkThreshold);
+    expect(before.paperThreshold, after.paperThreshold);
+    expect(before.analysis!.lengthMm, after.analysis!.lengthMm);
+    expect(before.analysis!.widthMm, after.analysis!.widthMm);
+    expect(
+      [
+        for (final p in before.analysis!.paperOutline) [p.x, p.y],
+      ],
+      [
+        for (final p in after.analysis!.paperOutline) [p.x, p.y],
+      ],
+    );
+  });
+
+  test('ambiguous ruler orientation has guidance without nominal geometry', () {
+    final photo = _Photo(ruler: false);
+    final inspected = inspectCalibrationPhoto(
+      photo.rgba,
+      photo.width,
+      photo.height,
+      referenceRows: photo.rows,
+    );
+    expect(inspected.analysis, isNull);
+    expect(inspected.guidance, isNotEmpty);
+    expect(inspected.inkThreshold, isNotNull);
+    expect(inspected.maskRgba, contains(0));
+    expect(photo.analyze, throwsA(isA<FormatException>()));
+  });
+
+  test(
+    'adjusted live and final photo retain the same accepted measurement',
+    () {
+      final photo = _Photo();
+      const settings = CalibrationImageSettings(brightness: -10, contrast: 1.1);
+      final live = processCalibrationLiveFrame(
+        CalibrationLiveInput(
+          rgba: photo.rgba,
+          width: photo.width,
+          height: photo.height,
+          referenceRows: photo.rows,
+          settings: settings,
+        ),
+      );
+      final finalPixels = adjustCalibrationRgba(
+        photo.rgba,
+        photo.width,
+        photo.height,
+        settings,
+      );
+      final finalAnalysis = analyzeCalibrationPhoto(
+        finalPixels,
+        photo.width,
+        photo.height,
+        referenceRows: photo.rows,
+      );
+      expect(live.guidance, isNull);
+      expect(live.processedRgba, finalPixels);
+      expect(live.analysis!.lengthMm, finalAnalysis.lengthMm);
+      expect(live.analysis!.widthMm, finalAnalysis.widthMm);
+      expect(live.analysis!.radiusMm, finalAnalysis.radiusMm);
+      expect(live.analysis!.feedOffsetDots, finalAnalysis.feedOffsetDots);
+      expect(live.analysis!.headOffsetDots, finalAnalysis.headOffsetDots);
+      expect(
+        [
+          for (final p in live.analysis!.paperOutline) [p.x, p.y],
+        ],
+        [
+          for (final p in finalAnalysis.paperOutline) [p.x, p.y],
+        ],
+      );
+    },
+  );
+
   test('measures paper rather than the printed reference bounds', () {
     final photo = _Photo();
     final result = photo.analyze();
