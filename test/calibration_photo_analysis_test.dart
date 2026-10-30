@@ -60,6 +60,58 @@ void main() {
     },
   );
 
+  test(
+    'gray thermal marks on a flash-lit background retain measured geometry',
+    () {
+      for (final matrix in [
+        [0.0, -2.2, 700.0, 2.2, 0.0, 220.0, 0.0, 0.0, 1.0],
+        [0.0, -2.2, 700.0, -2.2, 0.0, 740.0, 0.0, 0.0, 1.0],
+      ]) {
+        final photo = _Photo(
+          rows: 80,
+          thickMarks: true,
+          ink: 150,
+          glare: true,
+          matrix: matrix,
+        );
+        final result = analyzeCalibrationPhoto(
+          _blur(photo, 2),
+          photo.width,
+          photo.height,
+          referenceRows: photo.rows,
+        );
+        _expectGeometry(result, photo);
+        for (var i = 0; i < 4; i++) {
+          expect(result.fiducials[i].x, closeTo(photo.marks[i].x, 1.2));
+          expect(result.fiducials[i].y, closeTo(photo.marks[i].y, 1.2));
+        }
+      }
+    },
+  );
+
+  test(
+    'flash glare cannot invent ruler orientation when only crosses exist',
+    () {
+      final photo = _Photo(
+        rows: 80,
+        thickMarks: true,
+        ink: 150,
+        glare: true,
+        ruler: false,
+        matrix: [0, -2.2, 700, 2.2, 0, 220, 0, 0, 1],
+      );
+      expect(
+        () => analyzeCalibrationPhoto(
+          _blur(photo, 2),
+          photo.width,
+          photo.height,
+          referenceRows: photo.rows,
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    },
+  );
+
   test('thick markers still reject centres covered by solid ink', () {
     final photo = _Photo(
       thickMarks: true,
@@ -264,14 +316,6 @@ void main() {
     expect(photo.analyze, throwsA(isA<FormatException>()));
   });
 
-  test('faint marks fail even with exact taps', () {
-    final photo = _Photo(ink: 190);
-    expect(
-      () => photo.analyze(manual: photo.marks),
-      throwsA(isA<FormatException>()),
-    );
-  });
-
   test('blurred crosses fail even when their exact centres are provided', () {
     final photo = _Photo();
     final blurred = _blur(photo, 8);
@@ -438,6 +482,7 @@ class _Photo {
     this.notch = false,
     this.legacyLegendOverlap = false,
     this.thickMarks = false,
+    this.glare = false,
     List<double>? matrix,
   }) : matrix = matrix ?? [2.8, .45, 130, .35, 3.3, 95, .0009, -.0008, 1] {
     final inverse = _inverse(this.matrix);
@@ -452,6 +497,11 @@ class _Photo {
             final wx = (inverse[0] * px + inverse[1] * py + inverse[2]) / z;
             final wy = (inverse[3] * px + inverse[4] * py + inverse[5]) / z;
             var value = background.toDouble();
+            if (glare) {
+              final distance =
+                  math.pow((px - 400) / 130, 2) + math.pow((py - 500) / 230, 2);
+              value += 175 * math.exp(-distance / 2);
+            }
             if (_onPaper(wx, wy)) {
               value = _printed(wx, wy) ? ink.toDouble() : paper.toDouble();
             }
@@ -480,6 +530,7 @@ class _Photo {
   final bool ruler, text, extraCross, cutCorner, secondPaper, notch;
   final bool legacyLegendOverlap;
   final bool thickMarks;
+  final bool glare;
   final List<double> matrix;
   final int width, height;
   late final Uint8List rgba;

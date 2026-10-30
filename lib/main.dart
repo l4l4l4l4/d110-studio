@@ -1827,24 +1827,6 @@ class _StudioPageState extends State<StudioPage>
                             icon: const Icon(Icons.rotate_right),
                           ),
                           IconButton(
-                            tooltip: 'Уменьшить на 10%',
-                            onPressed: editable
-                                ? () => mutateSelected(
-                                    (e) => scaleElement(e, 1 / 1.1, 1 / 1.1),
-                                  )
-                                : null,
-                            icon: const Icon(Icons.zoom_out),
-                          ),
-                          IconButton(
-                            tooltip: 'Увеличить на 10%',
-                            onPressed: editable
-                                ? () => mutateSelected(
-                                    (e) => scaleElement(e, 1.1, 1.1),
-                                  )
-                                : null,
-                            icon: const Icon(Icons.zoom_in),
-                          ),
-                          IconButton(
                             tooltip: element?.aspectLocked == false
                                 ? 'Свободные пропорции · заблокировать'
                                 : 'Пропорции сохранены · разблокировать',
@@ -2283,10 +2265,12 @@ class NumberControl extends StatefulWidget {
     required this.onChanged,
     this.step = 1,
     this.suffix = '',
+    this.sliderSpan,
     super.key,
   });
   final String label, suffix;
   final double value, min, max, step;
+  final double? sliderSpan;
   final ValueChanged<double>? onChanged;
   @override
   State<NumberControl> createState() => _NumberControlState();
@@ -2295,12 +2279,43 @@ class NumberControl extends StatefulWidget {
 class _NumberControlState extends State<NumberControl> {
   late final controller = TextEditingController(text: displayValue);
   final focus = FocusNode();
-  String get displayValue => widget.value == widget.value.roundToDouble()
-      ? widget.value.toStringAsFixed(0)
-      : widget.value.toString();
+  final sliderFocus = FocusNode();
+  (double, double)? dragRange;
+  String format(double value) => value == value.roundToDouble()
+      ? value.toStringAsFixed(0)
+      : value.toString();
+  String get displayValue => format(widget.value);
+  String withUnit(double value) =>
+      '${format(value)}${widget.suffix.isEmpty ? '' : ' ${widget.suffix}'}';
+
+  (double, double) get sliderRange {
+    if (dragRange case final range?) return range;
+    final steps = ((widget.max - widget.min) / widget.step).floor();
+    final span =
+        widget.sliderSpan ??
+        (steps > 2048 ? widget.step * 1024 : widget.max - widget.min);
+    final window = math.min(steps, (span / widget.step).round());
+    final current = ((widget.value - widget.min) / widget.step).round();
+    final start = (current - window ~/ 2).clamp(0, steps - window);
+    return (
+      widget.min + start * widget.step,
+      widget.min + (start + window) * widget.step,
+    );
+  }
+
   @override
   void didUpdateWidget(covariant NumberControl oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.onChanged == null && oldWidget.onChanged != null) {
+      focus.unfocus();
+      sliderFocus.unfocus();
+      controller.text = displayValue;
+    }
+    if (oldWidget.min != widget.min ||
+        oldWidget.max != widget.max ||
+        widget.onChanged == null) {
+      dragRange = null;
+    }
     if (oldWidget.value != widget.value && !focus.hasFocus) {
       controller.text = displayValue;
     }
@@ -2310,10 +2325,15 @@ class _NumberControlState extends State<NumberControl> {
   void dispose() {
     controller.dispose();
     focus.dispose();
+    sliderFocus.dispose();
     super.dispose();
   }
 
   void submit(String text) {
+    if (widget.onChanged == null) {
+      controller.text = displayValue;
+      return;
+    }
     final value = double.tryParse(text.replaceAll(',', '.'));
     if (value == null || !value.isFinite) {
       controller.text = displayValue;
@@ -2326,66 +2346,111 @@ class _NumberControlState extends State<NumberControl> {
   }
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 5),
-    child: Row(
-      children: [
-        Expanded(child: Text(widget.label)),
-        IconButton(
-          tooltip: '${widget.label}: уменьшить',
-          onPressed: widget.onChanged == null || widget.value <= widget.min
-              ? null
-              : () => widget.onChanged!(
-                  (widget.value - widget.step).clamp(widget.min, widget.max),
+  Widget build(BuildContext context) {
+    final (lower, upper) = sliderRange;
+    final divisions = ((upper - lower) / widget.step).round();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text(widget.label)),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: 120,
+                child: Semantics(
+                  label: '${widget.label}: точное значение',
+                  child: TextField(
+                    controller: controller,
+                    focusNode: focus,
+                    enabled: widget.onChanged != null,
+                    textAlign: TextAlign.center,
+                    textInputAction: TextInputAction.done,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: true,
+                    ),
+                    decoration: InputDecoration(
+                      suffixText: widget.suffix.isEmpty ? null : widget.suffix,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 12,
+                      ),
+                    ),
+                    onChanged: (text) {
+                      final value = double.tryParse(text.replaceAll(',', '.'));
+                      if (value != null &&
+                          value.isFinite &&
+                          value >= widget.min &&
+                          value <= widget.max) {
+                        widget.onChanged?.call(value);
+                      }
+                    },
+                    onSubmitted: submit,
+                    onTapOutside: (_) {
+                      submit(controller.text);
+                      focus.unfocus();
+                    },
+                  ),
                 ),
-          icon: const Icon(Icons.remove),
-        ),
-        SizedBox(
-          width: 96,
-          child: TextField(
-            controller: controller,
-            focusNode: focus,
-            enabled: widget.onChanged != null,
-            textAlign: TextAlign.center,
-            keyboardType: const TextInputType.numberWithOptions(
-              decimal: true,
-              signed: true,
-            ),
-            decoration: InputDecoration(
-              suffixText: widget.suffix.isEmpty ? null : widget.suffix,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 8,
-                vertical: 12,
               ),
-            ),
-            onChanged: (text) {
-              final value = double.tryParse(text.replaceAll(',', '.'));
-              if (value != null &&
-                  value.isFinite &&
-                  value >= widget.min &&
-                  value <= widget.max) {
-                widget.onChanged?.call(value);
-              }
-            },
-            onSubmitted: submit,
-            onTapOutside: (_) {
-              submit(controller.text);
-              FocusManager.instance.primaryFocus?.unfocus();
-            },
+            ],
           ),
-        ),
-        IconButton(
-          tooltip: '${widget.label}: увеличить',
-          onPressed: widget.onChanged == null || widget.value >= widget.max
-              ? null
-              : () => widget.onChanged!(
-                  (widget.value + widget.step).clamp(widget.min, widget.max),
-                ),
-          icon: const Icon(Icons.add),
-        ),
-      ],
-    ),
-  );
+          Semantics(
+            label: widget.label,
+            child: Slider(
+              value: widget.value.clamp(lower, upper),
+              min: lower,
+              max: upper,
+              divisions: divisions > 0 ? divisions : null,
+              focusNode: sliderFocus,
+              label: withUnit(widget.value),
+              semanticFormatterCallback: withUnit,
+              onChangeStart: widget.onChanged == null || divisions == 0
+                  ? null
+                  : (_) {
+                      // Keep the window fixed until release, even as the canvas updates.
+                      setState(() => dragRange = (lower, upper));
+                      focus.unfocus();
+                      sliderFocus.requestFocus();
+                      controller.text = displayValue;
+                    },
+              onChanged: widget.onChanged == null || divisions == 0
+                  ? null
+                  : (value) {
+                      final steps = ((value - widget.min) / widget.step)
+                          .round();
+                      widget.onChanged!(
+                        (widget.min + steps * widget.step).clamp(
+                          widget.min,
+                          widget.max,
+                        ),
+                      );
+                    },
+              onChangeEnd: widget.onChanged == null || divisions == 0
+                  ? null
+                  : (_) => setState(() => dragRange = null),
+            ),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                withUnit(lower),
+                style: const TextStyle(color: StudioColors.muted, fontSize: 11),
+              ),
+              Text(
+                withUnit(upper),
+                style: const TextStyle(color: StudioColors.muted, fontSize: 11),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class ElementPanel extends StatefulWidget {
@@ -2426,6 +2491,7 @@ class _ElementPanelState extends State<ElementPanel> {
     ValueChanged<double> change, {
     double step = 1,
     String suffix = '',
+    double? sliderSpan,
   }) => NumberControl(
     label: label,
     value: value,
@@ -2433,6 +2499,7 @@ class _ElementPanelState extends State<ElementPanel> {
     max: max,
     step: step,
     suffix: suffix,
+    sliderSpan: sliderSpan,
     onChanged: widget.enabled ? (value) => update(() => change(value)) : null,
   );
   Widget styleButton(
@@ -2629,8 +2696,8 @@ class _ElementPanelState extends State<ElementPanel> {
           -3600,
           3600,
           (value) => element.rotation = value * math.pi / 180,
-          step: 5,
           suffix: '°',
+          sliderSpan: 720,
         ),
         if (element.kind == ElementKind.image) ...[
           const Divider(height: 24),
@@ -2671,7 +2738,6 @@ class _ElementPanelState extends State<ElementPanel> {
             value: element.settings.threshold.toDouble(),
             min: 0,
             max: 255,
-            step: 8,
             onChanged: widget.enabled
                 ? (value) => update(
                     () => element.settings = element.settings.copyWith(
@@ -2686,7 +2752,6 @@ class _ElementPanelState extends State<ElementPanel> {
             value: element.settings.brightness,
             min: -100,
             max: 100,
-            step: 5,
             onChanged: widget.enabled
                 ? (value) => update(
                     () => element.settings = element.settings.copyWith(
@@ -2701,7 +2766,6 @@ class _ElementPanelState extends State<ElementPanel> {
             value: element.settings.contrast * 100,
             min: 20,
             max: 300,
-            step: 10,
             suffix: '%',
             onChanged: widget.enabled
                 ? (value) => update(

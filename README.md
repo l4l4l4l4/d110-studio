@@ -23,6 +23,13 @@ switch between the original color source and the actual monochrome print
 result; only the latter is printed. Inspector controls scroll independently
 of the canvas.
 
+Numeric settings use labeled sliders with exact editable fields and units.
+Changes preview while dragging; arrow keys adjust one step. Label length keeps
+its 0.125 mm dot precision, and manual entry preserves finer measured values.
+Large dimensions use a local slider range fixed during each drag; exact entry
+still accepts the full supported range. Width/height sliders replace the old
+±10% size buttons.
+
 Named design tabs keep independent artwork, selection, inspector, zoom, pan
 and source/print preview states. The active tab and its close button scroll
 into view; closing a changed draft requires confirmation. Creating or switching
@@ -123,6 +130,13 @@ Geometry is calculated locally, including rounded corners and signed head/feed
 offsets. Ambiguous automatic marks require four ordered manual taps; missing
 paper edges or insufficient image quality are rejected, not guessed. The contour
 is overlaid on the photograph; optional numeric corrections remain secondary.
+Paper segmentation separates flash-lit background highlights from white paper
+and gray thermal ink. Measurements use local subpixel paper edges, not the
+segmentation brightness threshold. Fiducials are validated by their optical
+cores and white quadrants; ruler orientation also uses the asymmetric first
+feed stripe, which remains informative when blur erases interior one-dot phase.
+Missing crosses, ambiguous orientation and damaged contours still fail rather
+than returning nominal dimensions.
 
 Local session state retains the photo, frozen reference coordinates, draft and
 pending print outcome across closing or interruption. Reopening never prints

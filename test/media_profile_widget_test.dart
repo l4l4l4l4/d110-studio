@@ -209,10 +209,6 @@ void main() {
     page.selected = ink;
     page.changed();
     await tester.pump();
-    await tester.tap(find.byTooltip('Увеличить на 10%'));
-    await tester.pump();
-    expect(ink.height, closeTo(3960, .000001));
-    expect(ink.width, closeTo(264, .000001));
     page.editSelected();
     await tester.pump();
     final height = find.byWidgetPredicate(
@@ -220,6 +216,10 @@ void main() {
     );
     final field = find.descendant(of: height, matching: find.byType(TextField));
     await tester.ensureVisible(field);
+    await tester.enterText(field, '3960');
+    await tester.pump();
+    expect(ink.height, closeTo(3960, .000001));
+    expect(ink.width, closeTo(264, .000001));
     await tester.tap(field);
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();

@@ -34,7 +34,7 @@ class CalibrationPhotoAnalysis {
   final double edgeErrorDots;
 }
 
-/// Measures the existing 7-by-7, one-dot crosses and the *whole* paper contour.
+/// Measures the printed cross centres and the *whole* paper contour.
 ///
 /// X is printer feed, Y is the 96-dot head. The known cross separations supply
 /// scale; paper dimensions never supply scale. Corrected points must be in the
@@ -211,45 +211,62 @@ class _PhotoPixels {
     if (quantile(.99) - quantile(.01) < 65) {
       _fail('Мало контраста. Положите бумагу на тёмный фон.');
     }
-    var sum = 0.0;
-    for (var i = 0; i < 256; i++) {
-      sum += i * histogram[i];
-    }
-    var lowCount = 0;
-    var lowSum = 0.0;
-    var bestVariance = -1.0;
-    var split = 0;
-    for (var i = 0; i < 255; i++) {
-      lowCount += histogram[i];
-      lowSum += i * histogram[i];
-      final highCount = gray.length - lowCount;
-      if (lowCount == 0 || highCount == 0) continue;
-      final difference = lowSum / lowCount - (sum - lowSum) / highCount;
-      final variance = lowCount * highCount * difference * difference;
-      if (variance > bestVariance) {
-        bestVariance = variance;
-        split = i;
+    ({double dark, double light})? clusters(int lower) {
+      var total = 0, sum = 0.0;
+      for (var i = lower; i < 256; i++) {
+        total += histogram[i];
+        sum += i * histogram[i];
       }
+      var lowCount = 0, lowSum = 0.0;
+      var bestVariance = -1.0;
+      var split = lower;
+      for (var i = lower; i < 255; i++) {
+        lowCount += histogram[i];
+        lowSum += i * histogram[i];
+        final highCount = total - lowCount;
+        if (lowCount == 0 || highCount == 0) continue;
+        final difference = lowSum / lowCount - (sum - lowSum) / highCount;
+        final variance = lowCount * highCount * difference * difference;
+        if (variance > bestVariance) {
+          bestVariance = variance;
+          split = i;
+        }
+      }
+      lowCount = 0;
+      lowSum = 0;
+      for (var i = lower; i <= split; i++) {
+        lowCount += histogram[i];
+        lowSum += i * histogram[i];
+      }
+      if (lowCount == 0 || lowCount == total) return null;
+      return (
+        dark: lowSum / lowCount,
+        light: (sum - lowSum) / (total - lowCount),
+      );
     }
-    lowCount = 0;
-    lowSum = 0;
-    for (var i = 0; i <= split; i++) {
-      lowCount += histogram[i];
-      lowSum += i * histogram[i];
-    }
-    if (lowCount == 0 || lowCount == gray.length) {
-      _fail('Не видна бумага. Используйте тёмный фон.');
-    }
-    final dark = lowSum / lowCount;
-    final light = (sum - lowSum) / (gray.length - lowCount);
-    if (light - dark < 65) {
+
+    final global = clusters(0);
+    if (global == null || global.light - global.dark < 65) {
       _fail('Мало контраста. Используйте тёмный фон.');
     }
-    // Otsu's split may lie anywhere in an empty histogram valley. Its two
-    // cluster means give a stable subpixel edge threshold, unlike that split.
-    threshold = (dark + light) / 2;
+    var cut = (global.dark + global.light) / 2;
+    // A flash-lit background and gray thermal ink can both be brighter than
+    // the global foreground cut. Separate that foreground once more only when
+    // it contains two genuinely distinct brightness populations.
+    final foreground = clusters(cut.floor() + 1);
+    if (foreground != null && foreground.light - foreground.dark >= 65) {
+      cut = (foreground.dark + foreground.light) / 2;
+    }
+    threshold = cut;
+    // Specular background highlights belong outside the paper even when they
+    // exceed the ink cut. Precise edges are localized separately below.
+    final highlights = clusters(cut.floor() + 1);
+    final paperThreshold =
+        highlights != null && highlights.light - highlights.dark >= 25
+        ? (highlights.dark + highlights.light) / 2
+        : cut;
     for (var i = 0; i < gray.length; i++) {
-      region[i] = gray[i] > threshold ? 1 : 0;
+      region[i] = gray[i] > paperThreshold ? 1 : 0;
     }
   }
 
@@ -309,6 +326,8 @@ class _PhotoPixels {
     final count = _flood(seed, 2, 3);
     final first = Int32List(height)..fillRange(0, height, width);
     final last = Int32List(height)..fillRange(0, height, -1);
+    final top = Int32List(width)..fillRange(0, width, height);
+    final bottom = Int32List(width)..fillRange(0, width, -1);
     for (var i = 0; i < count; i++) {
       final p = queue[i], x = p % width, y = p ~/ width;
       if (x < 3 || y < 3 || x >= width - 3 || y >= height - 3) {
@@ -316,17 +335,65 @@ class _PhotoPixels {
       }
       if (x < first[y]) first[y] = x;
       if (x > last[y]) last[y] = x;
+      if (y < top[x]) top[x] = y;
+      if (y > bottom[x]) bottom[x] = y;
     }
-    // Only row extrema enter the convex hull. Ink holes, text and edge ruler
-    // notches therefore cannot be mistaken for the outer paper boundary.
+    // Segmentation finds the paper, not its precise edge. Recover each local
+    // dark/light midpoint so flash illumination and blur cannot shrink the
+    // measured dimensions to the global brightness cut.
+    CalibrationPhotoPoint? edge(int x, int y, int dx, int dy) {
+      const span = 6;
+      if (x - span * dx < 0 ||
+          x - span * dx >= width ||
+          x + span * dx < 0 ||
+          x + span * dx >= width ||
+          y - span * dy < 0 ||
+          y - span * dy >= height ||
+          y + span * dy < 0 ||
+          y + span * dy >= height) {
+        return null;
+      }
+      final origin = y * width + x, stride = dy * width + dx;
+      final dark =
+          (gray[origin - span * stride] + gray[origin - (span - 1) * stride]) /
+          2;
+      final light =
+          (gray[origin + span * stride] + gray[origin + (span - 1) * stride]) /
+          2;
+      if (light - dark < 25) return null;
+      final middle = (light + dark) / 2;
+      double? nearest;
+      for (var t = -span; t < span; t++) {
+        final a = gray[origin + t * stride];
+        final b = gray[origin + (t + 1) * stride];
+        if (a > middle || b <= middle) continue;
+        final crossing = t + (middle - a) / (b - a);
+        if (nearest == null || crossing.abs() < nearest.abs()) {
+          nearest = crossing;
+        }
+      }
+      if (nearest == null) return null;
+      return CalibrationPhotoPoint(
+        x + .5 + dx * nearest,
+        y + .5 + dy * nearest,
+      );
+    }
+
     final extremes = <CalibrationPhotoPoint>[];
+    void addEdge(int x, int y, int dx, int dy) {
+      final point = edge(x, y, dx, dy);
+      if (point != null) extremes.add(point);
+    }
+
     for (var y = 0; y < height; y++) {
       if (last[y] < 0) continue;
-      final left = first[y].toDouble(), right = last[y] + 1.0;
-      extremes.add(CalibrationPhotoPoint(left, y.toDouble()));
-      extremes.add(CalibrationPhotoPoint(right, y.toDouble()));
-      extremes.add(CalibrationPhotoPoint(left, y + 1.0));
-      extremes.add(CalibrationPhotoPoint(right, y + 1.0));
+      addEdge(first[y], y, 1, 0);
+      addEdge(last[y], y, -1, 0);
+    }
+    for (var x = 0; x < width; x++) {
+      if (bottom[x] < 0) continue;
+      addEdge(x, top[x], 0, 1);
+      addEdge(x, bottom[x], 0, -1);
     }
     final hull = _hull(extremes);
     var twiceArea = 0.0;
@@ -621,16 +688,28 @@ bool _matchesMarker(
   int halfStroke = calibrationMarkerHalfStroke,
 }) {
   final radius = arm + 1;
+  // Thermal dot gain and optical blur change the one-dot transition band,
+  // not the thick cross's core or its white quadrants. One-dot legacy marks
+  // cannot be eroded and keep their original full stencil.
   var black = 0.0, white = 0.0;
   var nBlack = 0, nWhite = 0, k = 0;
   for (var dy = -radius; dy <= radius; dy++) {
     for (var dx = -radius; dx <= radius; dx++) {
       final value = map.sample(image, point.x + dx, point.y + dy);
       values[k++] = value;
-      if (calibrationMarkerInk(dx, dy, arm: arm, halfStroke: halfStroke)) {
+      final ink = calibrationMarkerInk(
+        dx,
+        dy,
+        arm: halfStroke > 0 ? arm - 1 : arm,
+        halfStroke: halfStroke > 0 ? halfStroke - 1 : halfStroke,
+      );
+      final whiteCore =
+          !((dx.abs() <= halfStroke + 1 && dy.abs() <= arm + 1) ||
+              (dy.abs() <= halfStroke + 1 && dx.abs() <= arm + 1));
+      if (ink) {
         black += value;
         nBlack++;
-      } else {
+      } else if (halfStroke == 0 || whiteCore) {
         white += value;
         nWhite++;
       }
@@ -638,7 +717,7 @@ bool _matchesMarker(
   }
   black /= nBlack;
   white /= nWhite;
-  if (white - black < 75 || white < image.threshold + 20) return false;
+  if (white - black < 30 || white < image.threshold + 20) return false;
   final middle = (white + black) / 2;
   var missing = 0, unwanted = 0;
   k = 0;
@@ -648,11 +727,14 @@ bool _matchesMarker(
       final ink = calibrationMarkerInk(
         dx,
         dy,
-        arm: arm,
-        halfStroke: halfStroke,
+        arm: halfStroke > 0 ? arm - 1 : arm,
+        halfStroke: halfStroke > 0 ? halfStroke - 1 : halfStroke,
       );
       if (ink && value > middle) missing++;
-      if (!ink && value < middle) unwanted++;
+      final whiteCore =
+          !((dx.abs() <= halfStroke + 1 && dy.abs() <= arm + 1) ||
+              (dy.abs() <= halfStroke + 1 && dx.abs() <= arm + 1));
+      if (!ink && (halfStroke == 0 || whiteCore) && value < middle) unwanted++;
     }
   }
   return missing <= math.max(2, nBlack * .08) &&
@@ -671,8 +753,8 @@ double _rulerScore(_PhotoPixels image, _Projective map, int rows) {
         w = image.sample(white.x, white.y);
     final difference = w - b;
     count++;
-    score += (difference / 180).clamp(-1.0, 1.0);
-    if (difference > 70 && w > image.threshold + 15) good++;
+    score += difference / (difference.abs() + 15);
+    if (difference > 15 && w > image.threshold + 15) good++;
   }
 
   // These are physical pixel centres from renderMediaCalibrationPattern.
@@ -686,7 +768,26 @@ double _rulerScore(_PhotoPixels image, _Projective map, int rows) {
     pair(rows - 2.5, y + .5, 0, 2);
   }
   if (count < 12 || good < count * .6) return -1;
-  return score / count;
+  // The first feed tick is printed at x=0; there is no tick at x=rows-1.
+  // Integrate its stripe instead of relying only on the fragile one-dot phase
+  // of interior ticks, which thermal dot gain and camera blur can erase.
+  var edgeDifference = 0.0, edgeSamples = 0;
+  for (final y in [1.5, 2.5, 3.5]) {
+    for (final head in [y, 96 - y]) {
+      for (final x in [.5, 1.5]) {
+        final first = map.map(x, head), last = map.map(rows - x, head);
+        if (!image.inside(first.x, first.y) || !image.inside(last.x, last.y)) {
+          continue;
+        }
+        edgeDifference +=
+            image.sample(last.x, last.y) - image.sample(first.x, first.y);
+        edgeSamples++;
+      }
+    }
+  }
+  final difference = edgeSamples == 0 ? 0.0 : edgeDifference / edgeSamples;
+  final edgeScore = difference / (difference.abs() + 15);
+  return .75 * score / count + .25 * edgeScore;
 }
 
 /// A normalized eight-unknown solve; no iterative, unbounded RANSAC or external
