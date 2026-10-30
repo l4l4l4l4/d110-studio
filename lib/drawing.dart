@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'label.dart' show LabelDocument;
 import 'media_geometry.dart';
 
 /// Opens a drawing sheet measured in printer dots, not screen pixels.
@@ -13,6 +14,8 @@ import 'media_geometry.dart';
 /// for the existing image LabelElement path. Cancellation returns null. The
 /// visible white paper is not included in the PNG. Dimensions must be positive,
 /// at most 9600 dots per side and at most 16 megapixels in total.
+/// With [trimMargins], dimensions describe adjacent logical safe cells; physical
+/// margins are added only when the containing label is rasterized for printing.
 Future<Uint8List?> showDrawingEditor(
   BuildContext context, {
   required int width,
@@ -20,6 +23,7 @@ Future<Uint8List?> showDrawingEditor(
   MediaProfile? media,
   int rows = 1,
   int columns = 1,
+  bool trimMargins = false,
 }) {
   _validateDimensions(width, height);
   return showDialog<Uint8List>(
@@ -31,6 +35,7 @@ Future<Uint8List?> showDrawingEditor(
       media: media,
       rows: rows,
       columns: columns,
+      trimMargins: trimMargins,
     ),
   );
 }
@@ -84,17 +89,34 @@ class DrawingDocument extends ChangeNotifier {
     this.media,
     this.rows = 1,
     this.columns = 1,
+    this.trimMargins = false,
   }) {
     _validateDimensions(width, height);
+    final safe = trimMargins ? media?.safeRect : null;
     if (rows < 1 ||
         rows > 8 ||
         columns < 1 ||
         columns > 8 ||
+        (trimMargins &&
+            (media == null ||
+                !LabelDocument.fitsLayout(
+                  media!,
+                  rows,
+                  columns,
+                  trimMargins: true,
+                ))) ||
         (media != null &&
-            (width != media!.rasterRows * columns ||
-                height != media!.paperHeightDots * rows))) {
+            (width !=
+                    (trimMargins ? safe!.width.toInt() : media!.rasterRows) *
+                        columns ||
+                height !=
+                    (trimMargins
+                            ? safe!.height.toInt()
+                            : media!.paperHeightDots) *
+                        rows))) {
       throw ArgumentError(
-        'Размер рисунка должен соответствовать физической сетке ленты',
+        'Размер рисунка должен соответствовать сетке ленты; '
+        'обрезка полей требует измеренный безопасный прямоугольник',
       );
     }
     if (maxPoints < 1 || maxStrokes < 1) {
@@ -106,9 +128,10 @@ class DrawingDocument extends ChangeNotifier {
   final int width, height, maxPoints, maxStrokes;
   final MediaProfile? media;
   final int rows, columns;
+  final bool trimMargins;
 
   Path _gridPath({required bool printable}) {
-    if (media == null) {
+    if (media == null || trimMargins) {
       return Path()
         ..addRect(Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()));
     }
@@ -308,10 +331,12 @@ class _DrawingEditor extends StatefulWidget {
     this.media,
     required this.rows,
     required this.columns,
+    required this.trimMargins,
   });
   final int width, height;
   final MediaProfile? media;
   final int rows, columns;
+  final bool trimMargins;
 
   @override
   State<_DrawingEditor> createState() => _DrawingEditorState();
@@ -332,6 +357,7 @@ class _DrawingEditorState extends State<_DrawingEditor> {
       media: widget.media,
       rows: widget.rows,
       columns: widget.columns,
+      trimMargins: widget.trimMargins,
     );
   }
 

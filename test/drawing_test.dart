@@ -35,6 +35,122 @@ Future<({int width, int height, Uint8List rgba})> decodePng(
 
 void main() {
   testWidgets(
+    'trim drawing keeps logical edge and seam ink without a second crop',
+    (tester) async {
+      final media = MediaProfile(
+        lengthMm: 10,
+        widthMm: 14,
+        radiusMm: 2,
+        feedOffsetDots: 9,
+        headOffsetDots: 8,
+        measuredAt: DateTime.utc(2026, 10, 30),
+      );
+      final width = media.safeRect.width.toInt() * 2;
+      final height = media.safeRect.height.toInt() * 2;
+      final drawing = DrawingDocument(
+        width: width,
+        height: height,
+        media: media,
+        rows: 2,
+        columns: 2,
+        trimMargins: true,
+      );
+      addTearDown(drawing.dispose);
+      expect(
+        () => DrawingDocument(
+          width: media.rasterRows * 2,
+          height: media.paperHeightDots * 2,
+          media: media,
+          rows: 2,
+          columns: 2,
+          trimMargins: true,
+        ),
+        throwsArgumentError,
+      );
+      expect(
+        () => DrawingDocument(width: width, height: height, trimMargins: true),
+        throwsArgumentError,
+      );
+      final marks = [
+        const Offset(.5, .5),
+        Offset(width / 2 - .5, height / 2 - .5),
+        Offset(width / 2 + .5, height / 2 - .5),
+        Offset(width / 2 - .5, height / 2 + .5),
+        Offset(width / 2 + .5, height / 2 + .5),
+        Offset(width - .5, height - .5),
+      ];
+      for (final point in marks) {
+        drawing.beginStroke(1, point, 1);
+        drawing.endStroke(1);
+      }
+      await tester.runAsync(() async {
+        final png = await drawing.exportPng();
+        final source = await decodePng(png);
+        expect(source.width, width);
+        expect(source.height, height);
+        final recorder = ui.PictureRecorder();
+        drawing.paintPreview(Canvas(recorder));
+        final picture = recorder.endRecording();
+        final preview = await picture.toImage(width, height);
+        picture.dispose();
+        final pixels = await preview.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
+        preview.dispose();
+        final document = LabelDocument(
+          media: media,
+          rows: 2,
+          columns: 2,
+          trimMargins: true,
+          elements: [
+            LabelElement(
+              kind: ElementKind.image,
+              imageBytes: png,
+              inkOnly: true,
+              x: 0,
+              y: 0,
+              width: width.toDouble(),
+              height: height.toDouble(),
+            ),
+          ],
+        );
+        addTearDown(document.dispose);
+        await document.elements.single.prepare();
+        for (var index = 0; index < 4; index++) {
+          final raster = await renderTile(document, index);
+          var blackCount = 0;
+          for (var i = 0; i < raster.rgba.length; i += 4) {
+            if (raster.rgba[i] == 0) blackCount++;
+          }
+          expect(
+            blackCount,
+            index == 0 || index == 3 ? 2 : 1,
+            reason: 'native edge marks in tile $index',
+          );
+          final tile = document.tileRect(index);
+          for (final point in marks.where(tile.contains)) {
+            final feed =
+                (point.dx - tile.left).floor() +
+                media.safeRect.left.toInt() -
+                media.feedOffsetDots;
+            final head =
+                (point.dy - tile.top).floor() +
+                media.safeRect.top.toInt() -
+                media.headOffsetDots;
+            expect(raster.rgba[(feed * 96 + 95 - head) * 4], 0);
+          }
+        }
+        for (final point in marks) {
+          final offset = (point.dy.floor() * width + point.dx.floor()) * 4;
+          expect(source.rgba[offset + 3], 255);
+          expect(pixels!.getUint8(offset), 0);
+          expect(pixels.getUint8(offset + 3), 255);
+        }
+      });
+    },
+  );
+
+  testWidgets(
     'drawing masks rounded paper but exports recoverable corner ink',
     (tester) async {
       final drawing = DrawingDocument(

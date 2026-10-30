@@ -8,7 +8,7 @@ Dark Gruvbox Flutter label editor: text, transparent QR codes, images and freeha
 
 **Use:** connect the classic Bluetooth D110 (not `_BLE`), choose or calibrate the physical roll, compose and print. The printhead is fixed at 96 dots (nominally 12 mm); that is not a measurement of the paper width. Heat level 3 is maximum. For 30 mm labels with 8 mm gaps, use 30 mm: gap mode positions the next label automatically, without adding the gap to the image. Leave the QR's 4-module quiet zone clear. Templates are stored on the host, not inside the printer; firmware is not modified.
 
-**Build:** Flutter 3.41.9; `make check`, `make run`, `make apk`, `make apk-debug`, `make appimage`, `make windows`. Nix: `nix develop`. Android requires an Android SDK and JDK 17; release builds additionally require private `android/key.properties`. CI uses the `ANDROID_SIGNING` secret. Do not uninstall an existing signed app to replace it with a differently signed debug APK: that would delete local templates.
+**Build:** Flutter 3.41.9; `make check`, `make run`, `make apk`, `make apk-debug`, `make appimage`, `make windows`. Nix: `nix develop` for checks; `nix develop .#android --command make apk-debug` supplies the pinned Android SDK, NDK, CMake and JDK 17 locally. Release builds additionally require private `android/key.properties`. CI uses the `ANDROID_SIGNING` secret. Do not uninstall an existing signed app to replace it with a differently signed debug APK: that would delete local templates.
 
 Resize and rotation use distinct nearest touch targets. The gesture surface
 extends beyond the label paper, and selection handles stay inside the visible
@@ -35,12 +35,24 @@ unreadable draft storage is not silently overwritten.
 
 `Стек` splits one full-size design into a 1–8 by 1–8 sticker grid without
 rescaling its dots. Canvas seams show the exact crop boundaries. Templates
-save the grid and media geometry as version 3. Versions 1 and 2 retain their
-artwork and migrate to explicitly unmeasured legacy paper geometry.
+save the grid, media geometry and trim mode as version 4. Versions 1 and 2
+retain their artwork and migrate to explicitly unmeasured legacy geometry;
+version 3 retains its geometry with trim mode disabled.
 Printing proceeds left-to-right, then top-to-bottom: after each printer
 acknowledgement, an animated placement guide shows the emitted sticker and
 waits for `Наклеено — дальше`. Cancellation settles an in-flight sticker;
 an ambiguous failure stops the job without retrying or replaying it.
+
+`Стек без белых швов · обрезать края` uses the measured safe rectangle as each
+logical tile. Dots are translated into the physical printable area without
+scaling; cut off the indicated paper margins before joining the stickers.
+This mode requires measured media. It cannot print into hardware dead zones,
+and joined QR readability still requires physical cut/join/scan verification.
+
+The print dialog accepts 1–99 copies. Single-label copies advance only after
+each printer acknowledgement; stacks retain the placement pause between tiles
+and start a fresh placement guide for each copy. Cancellation never replays
+an uncertain print.
 
 The last printer address is saved only after a successful D110 handshake.
 While the native app is resumed, launch, return, adapter restoration and idle
@@ -95,11 +107,16 @@ rescaling the artwork. Hidden source ink remains available for later editing.
 
 `Калибровка ленты` is a five-step wizard: reference, photograph, contour review,
 verification print, and explicit visual confirmation. The short reference is
-80 × 96 dots with fixed dot-centre fiducials and ruler phase. An existing matching
-reference can be explicitly reused without printing another label.
+80 × 96 dots with fixed dot-centre fiducials and ruler phase. Crosses use
+13-dot spans and 3-dot strokes. An existing matching reference can be explicitly
+reused without printing another label. Back permits another guarded reference
+print instead of leaving the wizard stuck.
 
-The embedded rear camera takes a still photo only on the shutter button; photo
-import remains an alternative. Photograph the whole label on a dark background.
+The embedded rear camera opens immediately after the reference acknowledgement
+or explicit reuse. Its torch toggle lights the scene while composing; the
+shutter takes the still photo. Photo import remains an alternative. Cancelling
+the camera preserves the reference for another attempt. Photograph the whole
+label on a dark background.
 Camera-owned temporary files and Blob URLs are released after reading or a
 cancelled shutter; gallery/import sources are never deleted.
 Geometry is calculated locally, including rounded corners and signed head/feed
@@ -135,8 +152,8 @@ Startup restores the last user design acknowledged by the printer, without
 sending another print job. The immutable snapshot is captured before rendering
 or transmission; edits made afterward do not change that saved print.
 Failed or ambiguous jobs and QR/media diagnostics do not replace it.
-For a stack, the first acknowledged tile records the original full design once,
-not an isolated tile or an unconfirmed remainder.
+For a stack, acknowledgement of the final tile of a complete copy records the
+original full design, never an isolated tile or an unconfirmed remainder.
 
 History is local to the installation. Corrupt or unwritable storage produces an
 explicit warning. A save failure after acknowledgement means printed-but-not-
@@ -185,17 +202,10 @@ recovery, drawing raster output and QR calibration geometry. These tests do
 not establish physical QR readability. Text-entry fields own their controllers
 until the dialog route is unmounted, not merely until `showDialog` completes.
 
-## License
+## Licensing
 
-Project code is licensed under [ПО ХУЙ LICENSE](LICENSE), version 1.0.
-This is an **unapproved custom license**, not an OSI-approved open-source license.
-Contribution rules are separate: [POHUY-COVENANT-1.0](COVENANT.md).
-
-The license, covenant and required `pohuy` skill are pinned to
-[canonical commit d3686738cf73236b84da93e0981d6e0f61b37747](https://github.com/l4l4l4l4/POHUY-LICENSE/tree/d3686738cf73236b84da93e0981d6e0f61b37747).
-`skill.lock` records the canonical skill digest; contribution evidence belongs in
-`.pohuy-evidence/<submission-id>/`. The evidence checker verifies bundle structure
-and digests, not whether a client honestly captured every event.
+No project-code license is currently granted. Historical contribution evidence
+is retained as history, not as an active submission requirement.
 
 Bundled fonts retain SIL OFL-1.1 (licenses included in the app); dependencies retain
 their own licenses. Gothic/Bungee are Latin-only; international fallbacks are broad,

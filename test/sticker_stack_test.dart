@@ -97,4 +97,94 @@ void main() {
       job.dispose();
     },
   );
+  test(
+    'copies preserve tile order and restart placement for each design',
+    () async {
+      final sent = <int>[];
+      final job = StickerPrintJob(
+        tileCount: 2,
+        copies: 3,
+        printTile: (index) async => sent.add(index),
+      );
+      for (var i = 0; i < 6; i++) {
+        await job.printNext();
+        expect(job.phase, StickerPrintPhase.placement);
+        expect(job.copyIndex, i ~/ 2);
+        expect(job.tileIndex, i % 2);
+      }
+      await job.printNext();
+      expect(job.phase, StickerPrintPhase.completed);
+      expect(sent, [0, 1, 0, 1, 0, 1]);
+      job.dispose();
+    },
+  );
+
+  test(
+    'automatic copies serialize acknowledgements and stop on cancellation',
+    () async {
+      final acks = [Completer<void>(), Completer<void>()];
+      final sent = <int>[];
+      final job = StickerPrintJob(
+        tileCount: 1,
+        copies: 3,
+        waitForPlacement: false,
+        printTile: (index) {
+          sent.add(index);
+          return acks[sent.length - 1].future;
+        },
+      );
+      final pending = job.printNext();
+      await job.printNext();
+      expect(sent, [0]);
+      acks[0].complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(sent, [0, 0]);
+      job.cancel();
+      acks[1].complete();
+      await pending;
+      expect(sent, [0, 0]);
+      expect(job.phase, StickerPrintPhase.cancelled);
+      expect(job.transactionActive, false);
+      job.dispose();
+    },
+  );
+
+  test(
+    'automatic copy failure never retries or sends subsequent copies',
+    () async {
+      var attempts = 0;
+      final job = StickerPrintJob(
+        tileCount: 1,
+        copies: 4,
+        waitForPlacement: false,
+        printTile: (_) async {
+          attempts++;
+          if (attempts == 2) throw StateError('lost acknowledgement');
+        },
+      );
+      await job.printNext();
+      await job.printNext();
+      expect(attempts, 2);
+      expect(job.phase, StickerPrintPhase.failed);
+      job.dispose();
+    },
+  );
+
+  test('automatic copies complete exactly the requested count', () async {
+    var attempts = 0;
+    final job = StickerPrintJob(
+      tileCount: 1,
+      copies: 3,
+      waitForPlacement: false,
+      printTile: (_) async {
+        attempts++;
+      },
+    );
+    await job.printNext();
+    expect(attempts, 3);
+    expect(job.phase, StickerPrintPhase.completed);
+    await job.printNext();
+    expect(attempts, 3);
+    job.dispose();
+  });
 }

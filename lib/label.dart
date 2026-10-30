@@ -186,40 +186,65 @@ class LabelDocument {
     MediaProfile? media,
     int rows = 1,
     int columns = 1,
+    bool trimMargins = false,
     List<LabelElement>? elements,
   }) : _media = media ?? MediaProfile(lengthMm: lengthMm.toDouble()),
        _rows = rows,
        _columns = columns,
+       _trimMargins = trimMargins,
        elements = elements ?? [] {
-    _validateLayout(_media, rows, columns);
+    _validateLayout(_media, rows, columns, trimMargins: trimMargins);
   }
   String name;
   MediaProfile _media;
   int _rows, _columns;
+  bool _trimMargins;
   static const int maxCanvasPixels = geometry.maxMediaCanvasPixels;
   static const double maxElementWidth = 9600;
   static const double maxElementHeight = 9600;
 
-  static bool fitsLayout(MediaProfile media, int rows, int columns) =>
-      rows >= 1 &&
-      rows <= 8 &&
-      columns >= 1 &&
-      columns <= 8 &&
-      media.rasterRows * media.paperHeightDots * rows * columns <=
-          maxCanvasPixels;
+  static bool fitsLayout(
+    MediaProfile media,
+    int rows,
+    int columns, {
+    bool trimMargins = false,
+  }) {
+    if (rows < 1 || rows > 8 || columns < 1 || columns > 8) return false;
+    if (trimMargins) {
+      final safe = media.safeRect;
+      return media.isCalibrated &&
+          !safe.isEmpty &&
+          safe.width.toInt() * safe.height.toInt() * rows * columns <=
+              maxCanvasPixels;
+    }
+    return media.rasterRows * media.paperHeightDots * rows * columns <=
+        maxCanvasPixels;
+  }
 
-  static void _validateLayout(MediaProfile media, int rows, int columns) {
-    if (!fitsLayout(media, rows, columns)) {
+  static void _validateLayout(
+    MediaProfile media,
+    int rows,
+    int columns, {
+    bool trimMargins = false,
+  }) {
+    if (!fitsLayout(media, rows, columns, trimMargins: trimMargins)) {
       throw ArgumentError(
-        'Сетка должна быть от 1×1 до 8×8, макет — не больше 16 Мпикс.',
+        'Сетка должна быть от 1×1 до 8×8, макет — не больше 16 Мпикс. '
+        'Обрезка полей требует измеренную ленту с непустым безопасным прямоугольником.',
       );
     }
   }
 
   MediaProfile get media => _media;
   set media(MediaProfile value) {
-    _validateLayout(value, _rows, _columns);
+    _validateLayout(value, _rows, _columns, trimMargins: trimMargins);
     _media = value;
+  }
+
+  bool get trimMargins => _trimMargins;
+  set trimMargins(bool value) {
+    _validateLayout(_media, _rows, _columns, trimMargins: value);
+    _trimMargins = value;
   }
 
   double get lengthMm => media.lengthMm;
@@ -231,19 +256,21 @@ class LabelDocument {
 
   int get rows => _rows;
   set rows(int value) {
-    _validateLayout(_media, value, _columns);
+    _validateLayout(_media, value, _columns, trimMargins: trimMargins);
     _rows = value;
   }
 
   int get columns => _columns;
   set columns(int value) {
-    _validateLayout(_media, _rows, value);
+    _validateLayout(_media, _rows, value, trimMargins: trimMargins);
     _columns = value;
   }
 
   final List<LabelElement> elements;
-  int get tileWidth => media.rasterRows;
-  int get tileHeight => media.paperHeightDots;
+  int get tileWidth =>
+      trimMargins ? media.safeRect.width.toInt() : media.rasterRows;
+  int get tileHeight =>
+      trimMargins ? media.safeRect.height.toInt() : media.paperHeightDots;
   int get width => tileWidth * columns;
   int get canvasHeight => tileHeight * rows;
   int get tileCount => rows * columns;
@@ -262,6 +289,11 @@ class LabelDocument {
 
   Path get paperPath {
     final path = Path();
+    if (trimMargins) {
+      return path..addRect(
+        Rect.fromLTWH(0, 0, width.toDouble(), canvasHeight.toDouble()),
+      );
+    }
     final tile = media.paperPath;
     for (var i = 0; i < tileCount; i++) {
       path.addPath(tile, tileRect(i).topLeft);
@@ -271,6 +303,11 @@ class LabelDocument {
 
   Path get printablePath {
     final path = Path();
+    if (trimMargins) {
+      return path..addRect(
+        Rect.fromLTWH(0, 0, width.toDouble(), canvasHeight.toDouble()),
+      );
+    }
     final tile = media.printablePath;
     for (var i = 0; i < tileCount; i++) {
       path.addPath(tile, tileRect(i).topLeft);
@@ -279,20 +316,24 @@ class LabelDocument {
   }
 
   Map<String, dynamic> toJson() => {
-    'version': 3,
+    'version': 4,
     'name': name,
     'media': media.toJson(),
     'rows': rows,
     'columns': columns,
+    'trimMargins': trimMargins,
     'elements': elements.map((e) => e.toJson()).toList(),
   };
   factory LabelDocument.fromJson(Map<String, dynamic> json) {
-    if (json['version'] != 1 && json['version'] != 2 && json['version'] != 3) {
+    if (json['version'] != 1 &&
+        json['version'] != 2 &&
+        json['version'] != 3 &&
+        json['version'] != 4) {
       throw const FormatException('Неизвестная версия шаблона');
     }
     final MediaProfile media;
     try {
-      media = json['version'] == 3
+      media = json['version'] == 3 || json['version'] == 4
           ? MediaProfile.fromJson(
               Map<String, dynamic>.from(json['media'] as Map),
             )
@@ -302,7 +343,11 @@ class LabelDocument {
     }
     final rows = json['version'] == 1 ? 1 : json['rows'];
     final columns = json['version'] == 1 ? 1 : json['columns'];
-    if (rows is! int || columns is! int || !fitsLayout(media, rows, columns)) {
+    final trimMargins = json['version'] == 4 ? json['trimMargins'] : false;
+    if (rows is! int ||
+        columns is! int ||
+        trimMargins is! bool ||
+        !fitsLayout(media, rows, columns, trimMargins: trimMargins)) {
       throw const FormatException(
         'Некорректная или слишком большая сетка этикеток',
       );
@@ -316,6 +361,7 @@ class LabelDocument {
       media: media,
       rows: rows,
       columns: columns,
+      trimMargins: trimMargins,
       elements: items
           .map(
             (e) => LabelElement.fromJson(Map<String, dynamic>.from(e as Map)),
@@ -534,39 +580,53 @@ void _paintContent(
 Future<PrinterRaster> renderLabel(LabelDocument document) =>
     renderTile(document, 0);
 
-/// Rasterize a physical crop, without scaling the overall composition.
+/// Crops native logical dots into a physical raster; trim mode only translates.
 Future<PrinterRaster> renderTile(LabelDocument document, int index) async {
   final tile = document.tileRect(index);
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
   canvas.drawColor(Colors.white, BlendMode.src);
-  canvas.translate(
-    -tile.left - document.media.feedOffsetDots,
-    -tile.top - document.media.headOffsetDots,
-  );
-  canvas.clipPath(
-    document.media.printablePath.shift(tile.topLeft),
-    doAntiAlias: false,
-  );
+  if (document.trimMargins) {
+    final safe = document.media.safeRect;
+    canvas.translate(
+      safe.left - document.media.feedOffsetDots - tile.left,
+      safe.top - document.media.headOffsetDots - tile.top,
+    );
+    canvas.clipRect(tile, doAntiAlias: false);
+  } else {
+    canvas.translate(
+      -tile.left - document.media.feedOffsetDots,
+      -tile.top - document.media.headOffsetDots,
+    );
+    canvas.clipPath(
+      document.media.printablePath.shift(tile.topLeft),
+      doAntiAlias: false,
+    );
+  }
   canvas.drawPicture(_contentPicture(document));
   final picture = recorder.endRecording();
-  final image = await picture.toImage(
-    document.tileWidth,
-    LabelDocument.printHeadDots,
-  );
-  picture.dispose();
-  final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-  image.dispose();
+  ui.Image? image;
+  final ByteData? bytes;
+  try {
+    image = await picture.toImage(
+      document.media.rasterRows,
+      LabelDocument.printHeadDots,
+    );
+    bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  } finally {
+    image?.dispose();
+    picture.dispose();
+  }
   if (bytes == null) throw StateError('Не удалось растеризовать этикетку');
   final mono = monochromeRgba(
     bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
-    document.tileWidth,
+    document.media.rasterRows,
     LabelDocument.printHeadDots,
     const RasterSettings(),
   );
   return rotateForPrinter(
     mono,
-    document.tileWidth,
+    document.media.rasterRows,
     LabelDocument.printHeadDots,
   );
 }
@@ -599,6 +659,19 @@ List<String> printWarnings(LabelDocument document) {
     warnings.add(
       'Размер и совмещение ленты не измерены: выполните физическую калибровку.',
     );
+  }
+  if (document.trimMargins) {
+    warnings.add(
+      'Перед стыковкой обрежьте ножницами бумагу за безопасным прямоугольником: '
+      'программа не убирает физические непечатаемые поля.',
+    );
+    if (document.tileCount > 1 &&
+        document.elements.any((element) => element.kind == ElementKind.qr)) {
+      warnings.add(
+        'Совмещение наклеек и читаемость QR через физические стыки не проверены: '
+        'нужна пробная печать и сканирование после обрезки.',
+      );
+    }
   }
   for (final e in document.elements) {
     if (e.width < 1 || e.height < 1) {

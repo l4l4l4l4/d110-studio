@@ -1,11 +1,331 @@
-import 'dart:typed_data';
+import 'dart:convert';
 import 'dart:ui' as ui;
+import 'package:d110_studio/app_state_store.dart';
+import 'package:d110_studio/last_printed.dart';
+import 'package:d110_studio/workspace.dart';
+import 'package:flutter/services.dart';
+import 'package:d110_studio/media_geometry.dart';
 import 'package:d110_studio/raster.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:d110_studio/label.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'trim geometry survives last printed and workspace snapshot storage',
+    () async {
+      const channel = MethodChannel('test/trim-label-state');
+      final files = <String, String>{};
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            final args = call.arguments as Map;
+            if (call.method == 'readState') return files[args['slot']];
+            files[args['slot'] as String] = args['json'] as String;
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      final document = LabelDocument(
+        media: MediaProfile(
+          lengthMm: 10,
+          widthMm: 14,
+          radiusMm: 2,
+          feedOffsetDots: 9,
+          headOffsetDots: 8,
+          measuredAt: DateTime.utc(2026, 10, 30),
+        ),
+        rows: 2,
+        columns: 2,
+        trimMargins: true,
+      );
+      final workspace = DesignWorkspace(document);
+      addTearDown(workspace.dispose);
+      final expected = document.toJson();
+      final history = LastPrintedHistory(AppStateStore(channel: channel));
+      final job = LastPrintedJob.capture(document, history);
+      document.trimMargins = false;
+      expect(await job.confirmed(), isNull);
+      final restoredPrint = await history.restore();
+      addTearDown(restoredPrint!.dispose);
+      expect(restoredPrint.toJson(), expected);
+      document.trimMargins = true;
+      final store = AppStateStore(channel: channel);
+      await store.write(AppStateSlot.workspace, jsonEncode(workspace.toJson()));
+      final restoredWorkspace = await DesignWorkspace.restore(
+        await store.read(AppStateSlot.workspace),
+        printedSnapshot: await history.readSnapshot(),
+      );
+      addTearDown(restoredWorkspace.dispose);
+      expect(restoredWorkspace.tabs, hasLength(1));
+      expect(restoredWorkspace.active.document.toJson(), expected);
+      expect(restoredWorkspace.active.document.trimMargins, isTrue);
+    },
+  );
+
+  test('trim margins requires measured positive safe cells and persists', () {
+    final measured = MediaProfile(
+      lengthMm: 10,
+      widthMm: 14,
+      radiusMm: 2,
+      feedOffsetDots: 9,
+      headOffsetDots: 8,
+      measuredAt: DateTime.utc(2026, 10, 30),
+    );
+    final document = LabelDocument(
+      media: measured,
+      rows: 2,
+      columns: 2,
+      trimMargins: true,
+    );
+    addTearDown(document.dispose);
+    expect(document.tileWidth, measured.safeRect.width.toInt());
+    expect(document.tileHeight, measured.safeRect.height.toInt());
+    expect(document.width, document.tileWidth * 2);
+    expect(document.canvasHeight, document.tileHeight * 2);
+    final saved = document.toJson();
+    expect(saved['version'], 4);
+    expect(saved['trimMargins'], isTrue);
+    final restored = LabelDocument.fromJson(saved);
+    addTearDown(restored.dispose);
+    expect(restored.toJson(), saved);
+    final legacy = Map<String, dynamic>.from(saved)..['version'] = 3;
+    final normal = LabelDocument.fromJson(legacy);
+    addTearDown(normal.dispose);
+    expect(normal.trimMargins, isFalse);
+    expect(normal.tileWidth, measured.rasterRows);
+    expect(normal.tileHeight, measured.paperHeightDots);
+    expect(() => LabelDocument(trimMargins: true), throwsArgumentError);
+    expect(
+      () => document.media = measured.copyWith(clearMeasurement: true),
+      throwsArgumentError,
+    );
+    expect(document.media, same(measured));
+    final unmeasured = Map<String, dynamic>.from(saved)
+      ..['media'] = measured.copyWith(clearMeasurement: true).toJson();
+    expect(() => LabelDocument.fromJson(unmeasured), throwsFormatException);
+    final emptySafe = MediaProfile(
+      lengthMm: 10,
+      widthMm: 1.01,
+      headOffsetDots: 8,
+      measuredAt: measured.measuredAt,
+    );
+    expect(emptySafe.safeRect.isEmpty, isTrue);
+    expect(
+      () => LabelDocument(media: emptySafe, trimMargins: true),
+      throwsArgumentError,
+    );
+    final invalidFlag = Map<String, dynamic>.from(saved)
+      ..['trimMargins'] = 'true';
+    expect(() => LabelDocument.fromJson(invalidFlag), throwsFormatException);
+    final normalSaved = normal.toJson();
+    final normalRestored = LabelDocument.fromJson(normalSaved);
+    addTearDown(normalRestored.dispose);
+    expect(normalRestored.toJson(), normalSaved);
+  });
+
+  test('trim layouts retain the 16 megapixel logical canvas budget', () {
+    final measured = MediaProfile(
+      lengthMm: 150,
+      widthMm: 150,
+      measuredAt: DateTime.utc(2026, 10, 30),
+    );
+    expect(LabelDocument.fitsLayout(measured, 8, 8), isFalse);
+    expect(LabelDocument.fitsLayout(measured, 8, 8, trimMargins: true), isTrue);
+    final document = LabelDocument(
+      media: measured,
+      rows: 8,
+      columns: 8,
+      trimMargins: true,
+    );
+    addTearDown(document.dispose);
+    expect(document.width * document.canvasHeight, lessThanOrEqualTo(16000000));
+    expect(() => document.trimMargins = false, throwsArgumentError);
+    expect(document.trimMargins, isTrue);
+  });
+
+  for (final profile in [
+    MediaProfile(
+      lengthMm: 10,
+      widthMm: 14,
+      radiusMm: 2,
+      feedOffsetDots: 9,
+      headOffsetDots: 8,
+      measuredAt: DateTime.utc(2026, 10, 30),
+    ),
+    MediaProfile(
+      lengthMm: 10.125,
+      widthMm: 11.125,
+      radiusMm: 1.5,
+      feedOffsetDots: -7,
+      headOffsetDots: -4,
+      measuredAt: DateTime.utc(2026, 10, 30),
+    ),
+  ]) {
+    test(
+      'trim crops reconstruct native 2×2 pixels for ${profile.toJson()}',
+      () async {
+        final document = LabelDocument(
+          media: profile,
+          rows: 2,
+          columns: 2,
+          trimMargins: true,
+        );
+        addTearDown(document.dispose);
+        final source = Uint8List(document.width * document.canvasHeight * 4);
+        for (var y = 0; y < document.canvasHeight; y++) {
+          for (var x = 0; x < document.width; x++) {
+            final offset = (y * document.width + x) * 4;
+            // Asymmetric marks include every cell border and both sides of seams.
+            final black =
+                x % document.tileWidth == 0 ||
+                x % document.tileWidth == document.tileWidth - 1 ||
+                y % document.tileHeight == 0 ||
+                y % document.tileHeight == document.tileHeight - 1 ||
+                (x * 13 + y * 7) % 19 < 5;
+            source[offset] = source[offset + 1] = source[offset + 2] = black
+                ? 0
+                : 255;
+            source[offset + 3] = 255;
+          }
+        }
+        document.elements.add(
+          LabelElement(
+              kind: ElementKind.image,
+              x: 0,
+              y: 0,
+              width: document.width.toDouble(),
+              height: document.canvasHeight.toDouble(),
+            )
+            ..image = await rgbaImage(
+              source,
+              document.width,
+              document.canvasHeight,
+            ),
+        );
+        final reconstructed = Uint8List(source.length);
+        final safe = profile.safeRect;
+        for (var index = 0; index < 4; index++) {
+          final raster = await renderTile(document, index);
+          expect(raster.width, 96);
+          expect(raster.height, profile.rasterRows);
+          for (var feed = 0; feed < profile.rasterRows; feed++) {
+            for (var head = 0; head < 96; head++) {
+              final paperX = feed + profile.feedOffsetDots;
+              final paperY = head + profile.headOffsetDots;
+              final pixel = (feed * 96 + 95 - head) * 4;
+              if (!safe.contains(ui.Offset(paperX + .5, paperY + .5))) {
+                expect(
+                  raster.rgba[pixel],
+                  255,
+                  reason: 'untrimmed physical margin',
+                );
+                continue;
+              }
+              final x =
+                  index % 2 * document.tileWidth + paperX - safe.left.toInt();
+              final y =
+                  index ~/ 2 * document.tileHeight + paperY - safe.top.toInt();
+              final target = (y * document.width + x) * 4;
+              reconstructed.setRange(target, target + 4, raster.rgba, pixel);
+            }
+          }
+        }
+        expect(reconstructed, orderedEquals(source));
+        final preview = await renderDesign(document);
+        try {
+          expect(preview.width, document.width);
+          expect(preview.height, document.canvasHeight);
+          final bytes = await preview.toByteData(
+            format: ui.ImageByteFormat.rawRgba,
+          );
+          expect(
+            bytes!.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+            orderedEquals(source),
+          );
+        } finally {
+          preview.dispose();
+        }
+      },
+    );
+  }
+
+  test(
+    'trim QR keeps native border modules across rounded offset seams',
+    () async {
+      final media = MediaProfile(
+        lengthMm: 10,
+        widthMm: 12,
+        radiusMm: 2,
+        feedOffsetDots: 8,
+        headOffsetDots: 7,
+        measuredAt: DateTime.utc(2026, 10, 30),
+      );
+      final document = LabelDocument(
+        media: media,
+        rows: 2,
+        columns: 2,
+        trimMargins: true,
+      );
+      addTearDown(document.dispose);
+      final qr = LabelElement(
+        kind: ElementKind.qr,
+        text: 'TRIM',
+        x: (document.tileWidth - 29).toDouble(),
+        y: (document.tileHeight - 29).toDouble(),
+        width: 58,
+        height: 58,
+      );
+      await qr.prepare();
+      document.elements.add(qr);
+      expect(qr.qr!.moduleCount, 21);
+      var dark = 0;
+      for (var index = 0; index < 4; index++) {
+        final raster = await renderTile(document, index);
+        final tile = document.tileRect(index);
+        for (var y = 0; y < document.tileHeight; y++) {
+          for (var x = 0; x < document.tileWidth; x++) {
+            final moduleX = ((tile.left + x - qr.x - 8) / 2).floor();
+            final moduleY = ((tile.top + y - qr.y - 8) / 2).floor();
+            final expected =
+                moduleX >= 0 &&
+                moduleX < 21 &&
+                moduleY >= 0 &&
+                moduleY < 21 &&
+                qr.qr!.isDark(moduleY, moduleX);
+            final feed = x + media.safeRect.left.toInt() - media.feedOffsetDots;
+            final head = y + media.safeRect.top.toInt() - media.headOffsetDots;
+            expect(
+              raster.rgba[(feed * 96 + 95 - head) * 4],
+              expected ? 0 : 255,
+            );
+            if (expected) dark++;
+          }
+        }
+      }
+      var darkModules = 0;
+      for (var y = 0; y < 21; y++) {
+        for (var x = 0; x < 21; x++) {
+          if (qr.qr!.isDark(y, x)) darkModules++;
+        }
+      }
+      expect(
+        dark,
+        darkModules * 4,
+        reason: 'each module stays exactly 2×2 dots',
+      );
+      expect(printWarnings(document).join(' '), contains('ножниц'));
+      expect(printWarnings(document).join(' '), contains('не проверены'));
+      expect(
+        printWarnings(
+          document,
+        ).where((warning) => warning.contains('обрезана')),
+        isEmpty,
+      );
+    },
+  );
+
   test('legacy paper stays visibly uncalibrated after template migration', () {
     final legacy =
         LabelDocument(
@@ -19,7 +339,7 @@ void main() {
     final restored = LabelDocument.fromJson(legacy);
     addTearDown(restored.dispose);
     final saved = restored.toJson();
-    expect(saved['version'], 3);
+    expect(saved['version'], 4);
     expect((saved['media'] as Map)['measuredAt'], isNull);
     expect(restored.elements.single.text, 'Keep artwork');
   });

@@ -7,6 +7,7 @@ import 'calibration_photo_analysis.dart';
 import 'calibration_photo_review.dart';
 import 'image_decode.dart';
 import 'media_calibration_session.dart';
+import 'media_calibration_pattern.dart';
 import 'media_geometry.dart';
 import 'raster.dart';
 
@@ -110,8 +111,24 @@ Future<PrinterRaster> renderMediaCalibrationPattern(
   // the unmeasured paper edge. Their centers are exact raster coordinates.
   for (final x in [16.0, width - 17.0]) {
     for (final y in [16.0, 56.0]) {
-      canvas.drawRect(Rect.fromLTWH(x - 3, y, 7, 1), ink);
-      canvas.drawRect(Rect.fromLTWH(x, y - 3, 1, 7), ink);
+      canvas.drawRect(
+        Rect.fromLTWH(
+          x - calibrationMarkerArm,
+          y - calibrationMarkerHalfStroke,
+          calibrationMarkerArm * 2 + 1.0,
+          calibrationMarkerHalfStroke * 2 + 1.0,
+        ),
+        ink,
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(
+          x - calibrationMarkerHalfStroke,
+          y - calibrationMarkerArm,
+          calibrationMarkerHalfStroke * 2 + 1.0,
+          calibrationMarkerArm * 2 + 1.0,
+        ),
+        ink,
+      );
     }
   }
   final painter = TextPainter(
@@ -119,7 +136,7 @@ Future<PrinterRaster> renderMediaCalibrationPattern(
       text: verification ? 'CHECK\n8 dots=1mm' : 'REFERENCE\n8 dots=1mm',
       style: const TextStyle(
         color: Colors.black,
-        fontSize: 9,
+        fontSize: 7,
         fontWeight: FontWeight.bold,
         fontFamily: 'NotoSans',
       ),
@@ -127,7 +144,7 @@ Future<PrinterRaster> renderMediaCalibrationPattern(
     textDirection: TextDirection.ltr,
     maxLines: 2,
   )..layout(maxWidth: (width - 24).toDouble());
-  painter.paint(canvas, const Offset(12, 22));
+  painter.paint(canvas, const Offset(12, 27));
   painter.dispose();
   final picture = recorder.endRecording();
   ui.Image? image;
@@ -200,6 +217,7 @@ class _MediaCalibrationState extends State<_MediaCalibration>
   Future<void> writes = Future.value();
   bool loading = true, busy = false, recoveryRequired = false;
   bool storageWarning = false;
+  bool cameraRequested = false;
   String? failure, details;
 
   bool get canPrint => widget.canPrintNow?.call() ?? widget.canPrint;
@@ -235,6 +253,7 @@ class _MediaCalibrationState extends State<_MediaCalibration>
         }),
       );
     }
+    if (state == AppLifecycleState.resumed) openRequestedCamera();
   }
 
   @override
@@ -301,7 +320,31 @@ class _MediaCalibrationState extends State<_MediaCalibration>
     }
   }
 
-  Future<void> go(MediaCalibrationSession next) async {
+  void requestCamera() {
+    cameraRequested = true;
+    openRequestedCamera();
+  }
+
+  void openRequestedCamera() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (!mounted ||
+        !cameraRequested ||
+        loading ||
+        busy ||
+        recoveryRequired ||
+        session.step != MediaCalibrationStep.photo ||
+        session.pendingJob != null ||
+        (lifecycle != null && lifecycle != AppLifecycleState.resumed)) {
+      return;
+    }
+    cameraRequested = false;
+    unawaited(capture());
+  }
+
+  Future<void> go(
+    MediaCalibrationSession next, {
+    bool openCamera = false,
+  }) async {
     if (busy) return;
     setState(() {
       busy = true;
@@ -316,6 +359,7 @@ class _MediaCalibrationState extends State<_MediaCalibration>
           recoveryRequired = false;
           storageWarning = false;
         });
+        if (openCamera) cameraRequested = true;
       }
     } catch (error) {
       if (mounted) {
@@ -326,6 +370,7 @@ class _MediaCalibrationState extends State<_MediaCalibration>
       }
     } finally {
       if (mounted) setState(() => busy = false);
+      openRequestedCamera();
     }
   }
 
@@ -419,6 +464,7 @@ class _MediaCalibrationState extends State<_MediaCalibration>
       }
     } finally {
       if (mounted) setState(() => busy = false);
+      if (mounted && acknowledged && !verification) requestCamera();
     }
   }
 
@@ -463,6 +509,7 @@ class _MediaCalibrationState extends State<_MediaCalibration>
         referenceRows: session.referenceRows,
         referenceReady: true,
       ),
+      openCamera: true,
     );
   }
 
@@ -470,8 +517,10 @@ class _MediaCalibrationState extends State<_MediaCalibration>
     if (busy) return;
     setState(() {
       busy = true;
-      failure = null;
-      details = null;
+      if (!storageWarning) {
+        failure = null;
+        details = null;
+      }
     });
     try {
       final Uint8List? bytes;
@@ -766,7 +815,12 @@ class _MediaCalibrationState extends State<_MediaCalibration>
         switch (step) {
           case MediaCalibrationStep.reference:
             if (session.referenceReady) {
-              unawaited(go(session.copyWith(step: MediaCalibrationStep.photo)));
+              unawaited(
+                go(
+                  session.copyWith(step: MediaCalibrationStep.photo),
+                  openCamera: true,
+                ),
+              );
             } else {
               unawaited(print(verification: false));
             }
@@ -939,9 +993,25 @@ class _MediaCalibrationState extends State<_MediaCalibration>
                     ),
                     if (!recoveryRequired && !loading)
                       switch (step) {
-                        MediaCalibrationStep.reference => TextButton(
-                          onPressed: busy ? null : reuseReference,
-                          child: const Text('Эталон уже есть'),
+                        MediaCalibrationStep.reference => Column(
+                          children: [
+                            if (session.referenceReady)
+                              TextButton.icon(
+                                key: const ValueKey(
+                                  'calibration-reprint-reference',
+                                ),
+                                onPressed: busy || !canPrint
+                                    ? null
+                                    : () => print(verification: false),
+                                icon: const Icon(Icons.print_outlined),
+                                label: const Text('Напечатать эталон ещё раз'),
+                              )
+                            else
+                              TextButton(
+                                onPressed: busy ? null : reuseReference,
+                                child: const Text('Эталон уже есть'),
+                              ),
+                          ],
                         ),
                         MediaCalibrationStep.photo => Row(
                           mainAxisAlignment: MainAxisAlignment.center,

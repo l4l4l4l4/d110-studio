@@ -41,6 +41,45 @@ void main() {
     _expectGeometry(photo.analyze(), photo);
   });
 
+  test(
+    'thick open crosses retain projective centroids and manual validation',
+    () {
+      for (final matrix in [
+        [2.8, .45, 130.0, .35, 3.3, 95.0, .0009, -.0008, 1.0],
+        [-2.9, -.3, 780.0, .2, -3.5, 620.0, .0004, .0003, 1.0],
+      ]) {
+        final photo = _Photo(thickMarks: true, rows: 80, matrix: matrix);
+        final result = photo.analyze();
+        _expectGeometry(result, photo);
+        _expectGeometry(photo.analyze(manual: photo.marks), photo);
+        for (var i = 0; i < 4; i++) {
+          expect(result.fiducials[i].x, closeTo(photo.marks[i].x, 1.2));
+          expect(result.fiducials[i].y, closeTo(photo.marks[i].y, 1.2));
+        }
+      }
+    },
+  );
+
+  test('thick markers still reject centres covered by solid ink', () {
+    final photo = _Photo(
+      thickMarks: true,
+      matrix: [4, 0, 130, 0, 4, 95, 0, 0, 1],
+    );
+    final point = photo.marks.first;
+    for (var y = (point.y - 30).floor(); y < point.y + 30; y++) {
+      for (var x = (point.x - 30).floor(); x < point.x + 30; x++) {
+        final i = (y * photo.width + x) * 4;
+        photo.rgba[i] = 19;
+        photo.rgba[i + 1] = 19;
+        photo.rgba[i + 2] = 19;
+      }
+    }
+    expect(
+      () => photo.analyze(manual: photo.marks),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
   test('paper starting after raster zero produces negative offsets', () {
     final photo = _Photo(feed: -4, head: -3);
     _expectGeometry(photo.analyze(), photo);
@@ -398,6 +437,7 @@ class _Photo {
     this.secondPaper = false,
     this.notch = false,
     this.legacyLegendOverlap = false,
+    this.thickMarks = false,
     List<double>? matrix,
   }) : matrix = matrix ?? [2.8, .45, 130, .35, 3.3, 95, .0009, -.0008, 1] {
     final inverse = _inverse(this.matrix);
@@ -439,6 +479,7 @@ class _Photo {
   final double length, paperWidth, radius;
   final bool ruler, text, extraCross, cutCorner, secondPaper, notch;
   final bool legacyLegendOverlap;
+  final bool thickMarks;
   final List<double> matrix;
   final int width, height;
   late final Uint8List rgba;
@@ -482,7 +523,9 @@ class _Photo {
       if (i == missingMark) continue;
       final dx = (x - _printCenters[i][0]).abs();
       final dy = (y - _printCenters[i][1]).abs();
-      if ((dx < .5 && dy < 3.5) || (dy < .5 && dx < 3.5)) return true;
+      final stroke = thickMarks ? 1.5 : .5;
+      final arm = thickMarks ? 6.5 : 3.5;
+      if ((dx < stroke && dy < arm) || (dy < stroke && dx < arm)) return true;
     }
     // Exact local ink topology of the old NotoSans legend's wrapped "mm",
     // observed in the real packed 80-row reference. Five dots merge into BL;

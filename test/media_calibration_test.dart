@@ -199,7 +199,6 @@ void main() {
       pending.complete();
       await settle(tester);
       expect(MediaCalibrationSession.decode(progress!).referenceReady, isTrue);
-      await pressIO(tester);
       expect(captures, 1);
       expect(printed, hasLength(1));
       final restored = MediaCalibrationSession.decode(progress!);
@@ -210,10 +209,120 @@ void main() {
     },
   );
 
+  testWidgets('Back retains Continue and an explicit repeat reference print', (
+    tester,
+  ) async {
+    var prints = 0;
+    var captures = 0;
+    final link = ValueNotifier(true);
+    addTearDown(link.dispose);
+    String? progress;
+    await open(
+      tester,
+      link: link,
+      print: (_) async => prints++,
+      save: (_) async => fail('unverified profile saved'),
+      capture: () async {
+        captures++;
+        return null;
+      },
+      saveSession: (value) async => progress = value,
+    );
+    await pressIO(tester);
+    expect(captures, 1);
+    await tester.tap(find.byIcon(Icons.arrow_back));
+    await settle(tester);
+    expect(prints, 1);
+    final reprint = find.byKey(const ValueKey('calibration-reprint-reference'));
+    expect(reprint, findsOneWidget);
+    link.value = false;
+    await tester.pump();
+    expect(tester.widget<TextButton>(reprint).onPressed, isNull);
+    await pressIO(tester);
+    expect(captures, 2);
+    expect(prints, 1);
+    await tester.tap(find.byIcon(Icons.arrow_back));
+    await settle(tester);
+    link.value = true;
+    await tester.pump();
+    tester.widget<TextButton>(reprint).onPressed!();
+    await until(tester, () => captures == 3);
+    await settle(tester);
+    expect(prints, 2);
+    expect(
+      MediaCalibrationSession.decode(progress!).step,
+      MediaCalibrationStep.photo,
+    );
+    expect(MediaCalibrationSession.decode(progress!).pendingJob, isNull);
+  });
+
+  testWidgets(
+    'ACK with failed progress write opens camera without reprinting',
+    (tester) async {
+      var prints = 0;
+      var captures = 0;
+      await open(
+        tester,
+        print: (_) async => prints++,
+        save: (_) async => fail('unverified profile saved'),
+        capture: () async {
+          captures++;
+          return null;
+        },
+        saveSession: (value) async {
+          if (MediaCalibrationSession.decode(value).referenceReady) {
+            throw StateError('disk full after ACK');
+          }
+        },
+      );
+      await pressIO(tester);
+      expect(prints, 1);
+      expect(captures, 1);
+      expect(find.byIcon(Icons.arrow_back), findsOneWidget);
+    },
+  );
+
+  testWidgets('reference ACK in background defers camera until foreground', (
+    tester,
+  ) async {
+    final ack = Completer<void>();
+    var prints = 0;
+    var captures = 0;
+    await open(
+      tester,
+      print: (_) async {
+        prints++;
+        await ack.future;
+      },
+      save: (_) async => fail('unverified profile saved'),
+      capture: () async {
+        captures++;
+        return null;
+      },
+    );
+    tester.widget<FilledButton>(primary).onPressed!();
+    await until(tester, () => prints == 1);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    ack.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(captures, 0);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await settle(tester);
+    expect(captures, 1);
+    expect(prints, 1);
+  });
+
   testWidgets(
     'uncertain print survives reopening and cannot auto-retry or save',
     (tester) async {
       var calls = 0;
+      var captures = 0;
+      Future<Uint8List?> capture() async {
+        captures++;
+        return null;
+      }
+
       String? progress;
       Future<void> print(PrinterRaster _) async {
         calls++;
@@ -226,6 +335,7 @@ void main() {
         tester,
         print: print,
         save: save,
+        capture: capture,
         saveSession: (json) async => progress = json,
       );
       await pressIO(tester);
@@ -239,6 +349,7 @@ void main() {
         tester,
         print: print,
         save: save,
+        capture: capture,
         readSession: () async => progress,
         saveSession: (json) async => progress = json,
       );
@@ -249,6 +360,7 @@ void main() {
       await tester.tap(find.widgetWithText(TextButton, 'Отмена'));
       await tester.pumpAndSettle();
       expect(calls, 1);
+      expect(captures, 0);
       expect(MediaCalibrationSession.decode(progress!).verified, isFalse);
     },
   );

@@ -19,6 +19,7 @@ import 'last_printed.dart';
 import 'workspace.dart';
 import 'media_geometry.dart';
 import 'media_calibration.dart';
+import 'print_quantity.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -348,7 +349,12 @@ class _StudioPageState extends State<StudioPage>
       printPattern: (raster) =>
           printer.printRaster(raster.packed, raster.height, density: 1),
       saveProfile: (profile) async {
-        if (!LabelDocument.fitsLayout(profile, target.rows, target.columns)) {
+        if (!LabelDocument.fitsLayout(
+          profile,
+          target.rows,
+          target.columns,
+          trimMargins: target.trimMargins,
+        )) {
           throw StateError(
             'Сначала уменьшите сетку: макет с этой лентой превышает 16 Мпикс.',
           );
@@ -606,6 +612,7 @@ class _StudioPageState extends State<StudioPage>
       media: target.media,
       rows: target.rows,
       columns: target.columns,
+      trimMargins: target.trimMargins,
     );
     if (bytes == null || !mounted || document != target) return;
     final element = LabelElement(
@@ -680,6 +687,12 @@ class _StudioPageState extends State<StudioPage>
     final printedDocument = await job.prepare();
     try {
       if (!mounted) return;
+      final copies = await showDialog<int>(
+        context: context,
+        builder: (_) =>
+            PrintQuantityDialog(tilesPerDesign: printedDocument.tileCount),
+      );
+      if (copies == null || !mounted) return;
       final warnings = printWarnings(printedDocument);
       if (_defaultMedia.isCalibrated &&
           jsonEncode(printedDocument.media.toJson()) !=
@@ -710,41 +723,43 @@ class _StudioPageState extends State<StudioPage>
         if (proceed != true) return;
       }
       if (!mounted) return;
-      if (printedDocument.tileCount > 1) {
+      Future<void> printTile(int index) async {
+        if (!printer.connected) {
+          throw StateError(
+            'Принтер отключён. Задание остановлено без повторной печати.',
+          );
+        }
+        final raster = await renderTile(printedDocument, index);
+        await printer.printRaster(
+          raster.packed,
+          raster.height,
+          density: density,
+        );
+        if (index == printedDocument.tileCount - 1) {
+          await _recordPrinted(job);
+        }
+      }
+
+      if (copies == 1 && printedDocument.tileCount == 1) {
+        await printTile(0);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Принтер подтвердил печать. Проверьте наклейку.'),
+            ),
+          );
+        }
+      } else {
         await showDialog<void>(
           context: context,
           barrierDismissible: false,
           builder: (context) => StickerPrintDialog(
             document: printedDocument,
-            printTile: (index) async {
-              if (!printer.connected) {
-                throw StateError(
-                  'Принтер отключён. Эта сборка остановлена без повторной печати.',
-                );
-              }
-              final raster = await renderTile(printedDocument, index);
-              await printer.printRaster(
-                raster.packed,
-                raster.height,
-                density: density,
-              );
-              await _recordPrinted(job);
-            },
+            copies: copies,
+            printTile: printTile,
           ),
         );
-        return;
       }
-      final raster = await renderLabel(printedDocument);
-      await printer.printRaster(raster.packed, raster.height, density: density);
-      await _recordPrinted(job);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Принтер подтвердил завершение задания. Проверьте этикетку.',
-          ),
-        ),
-      );
     } finally {
       printedDocument.dispose();
     }
@@ -1013,6 +1028,7 @@ class _StudioPageState extends State<StudioPage>
                             _defaultMedia,
                             document.rows,
                             document.columns,
+                            trimMargins: document.trimMargins,
                           )
                       ? null
                       : () {
@@ -1106,11 +1122,35 @@ class _StudioPageState extends State<StudioPage>
               ),
               Text(
                 '${document.tileCount} наклеек · '
-                '${document.lengthMm * document.columns} × '
-                '${document.media.widthMm * document.rows} мм.\n'
+                '${document.width / mediaDotsPerMm} × '
+                '${document.canvasHeight / mediaDotsPerMm} мм.\n'
                 'Печать по строкам слева направо. Между наклейками '
                 'нужно подтвердить размещение; швы на макете не печатаются.',
                 style: const TextStyle(color: StudioColors.muted, fontSize: 12),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Стек без белых швов · обрезать края'),
+                subtitle: Text(
+                  document.media.isCalibrated
+                      ? 'Обрежьте каждую наклейку до ${document.media.safeRect.width / mediaDotsPerMm} × '
+                            '${document.media.safeRect.height / mediaDotsPerMm} мм перед склейкой. '
+                            'Размеры объектов не меняются; проверьте их положение.'
+                      : 'Сначала откалибруйте ленту. Непечатаемые края нужно срезать.',
+                ),
+                value: document.trimMargins,
+                onChanged:
+                    busy ||
+                        !document.media.isCalibrated ||
+                        document.media.safeRect.isEmpty
+                    ? null
+                    : (value) {
+                        document.trimMargins = value;
+                        viewZoom = 1;
+                        viewPan = Offset.zero;
+                        changed();
+                        update(() {});
+                      },
               ),
               const SizedBox(height: 12),
               OutlinedButton.icon(
@@ -2702,9 +2742,11 @@ class StickerPrintDialog extends StatefulWidget {
   const StickerPrintDialog({
     required this.document,
     required this.printTile,
+    this.copies = 1,
     super.key,
   });
   final LabelDocument document;
+  final int copies;
   final Future<void> Function(int index) printTile;
   @override
   State<StickerPrintDialog> createState() => _StickerPrintDialogState();
@@ -2714,6 +2756,8 @@ class _StickerPrintDialogState extends State<StickerPrintDialog> {
   late final job = StickerPrintJob(
     tileCount: widget.document.tileCount,
     printTile: widget.printTile,
+    copies: widget.copies,
+    waitForPlacement: widget.document.tileCount > 1,
   );
   bool placementReady = false;
 
@@ -2746,15 +2790,18 @@ class _StickerPrintDialogState extends State<StickerPrintDialog> {
       StickerPrintPhase.cancelled => true,
       _ => false,
     };
-    final tile = math.max(0, job.index);
+    final tile = job.tileIndex;
     final status = switch (job.phase) {
       StickerPrintPhase.ready => 'Подготовка сборки',
       StickerPrintPhase.printing =>
-        'Печать ${tile + 1} / ${job.tileCount} · ожидаем подтверждение принтера',
+        'Печать ${job.index + 1} / ${job.totalCount} · ожидаем подтверждение принтера',
       StickerPrintPhase.placement =>
-        'Наклейте ${tile + 1} в строку ${tile ~/ document.columns + 1}, '
-            'столбец ${tile % document.columns + 1}',
-      StickerPrintPhase.completed => 'Все наклейки размещены',
+        'Копия ${job.copyIndex + 1} / ${job.copies} · наклейте ${tile + 1} '
+            'в строку ${tile ~/ document.columns + 1}, столбец ${tile % document.columns + 1}',
+      StickerPrintPhase.completed =>
+        document.tileCount > 1
+            ? 'Все наклейки размещены'
+            : 'Принтер подтвердил печать ${job.copies} копий. Проверьте наклейки.',
       StickerPrintPhase.cancelled =>
         job.transactionActive
             ? 'Отменено. Уже отправленная наклейка ещё может напечататься; '
@@ -2775,20 +2822,23 @@ class _StickerPrintDialogState extends State<StickerPrintDialog> {
             child: Column(
               children: [
                 Text(
-                  'Сборка ${document.rows} × ${document.columns}',
+                  document.tileCount > 1
+                      ? 'Сборка ${document.rows} × ${document.columns} · '
+                            'копия ${job.copyIndex + 1} / ${job.copies}'
+                      : 'Печать · ${job.copies} копий',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 12),
                 LinearProgressIndicator(
                   value: printing
                       ? null
-                      : ((tile +
+                      : ((job.index +
                                     (placing ||
                                             job.phase ==
                                                 StickerPrintPhase.completed
                                         ? 1
                                         : 0)) /
-                                job.tileCount)
+                                job.totalCount)
                             .clamp(0.0, 1.0),
                 ),
                 const SizedBox(height: 12),
@@ -2849,13 +2899,20 @@ class _StickerPrintDialogState extends State<StickerPrintDialog> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  'Порядок: слева направо, затем следующая строка. '
-                  'Ориентация макета соответствует размещению; зазор ленты '
-                  'не добавляется к сборке.',
-                  style: TextStyle(color: StudioColors.muted, fontSize: 12),
-                  textAlign: TextAlign.center,
-                ),
+                if (document.tileCount > 1)
+                  Text(
+                    document.trimMargins
+                        ? 'Срежьте белые края до ${document.tileWidth / mediaDotsPerMm} × '
+                              '${document.tileHeight / mediaDotsPerMm} мм. '
+                              'Склейте обрезанные прямоугольники без зазора.'
+                        : 'Слева направо, затем следующая строка. '
+                              'Перед следующей копией начните новую сборку.',
+                    style: const TextStyle(
+                      color: StudioColors.muted,
+                      fontSize: 12,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
                 const SizedBox(height: 12),
                 Wrap(
                   spacing: 12,
@@ -2873,8 +2930,10 @@ class _StickerPrintDialogState extends State<StickerPrintDialog> {
                             ? () => unawaited(job.printNext())
                             : null,
                         child: Text(
-                          tile + 1 == job.tileCount
+                          job.index + 1 == job.totalCount
                               ? 'Наклеено · завершить'
+                              : tile + 1 == job.tileCount
+                              ? 'Наклеено · новая копия'
                               : 'Наклеено · печатать следующую',
                         ),
                       ),

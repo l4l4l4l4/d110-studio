@@ -35,6 +35,11 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
   Future<void> _opening = Future<void>.value();
   Future<void> _closing = Future<void>.value();
   Future<Uint8List?>? _capture;
+  Future<void>? _flashOperation;
+  bool _flashBusy = false;
+  bool _flashAvailable = true;
+  bool _torchOn = false;
+  String? _flashError;
   int _generation = 0;
   bool _loading = false;
   bool _busy = false;
@@ -80,6 +85,7 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
         !_active ||
         _finished ||
         _busy ||
+        _flashBusy ||
         _loading ||
         _releaseFailed ||
         _controller != null) {
@@ -130,6 +136,9 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
       if (!_active) return;
       _controller = pending;
       pending = null;
+      _flashAvailable = true;
+      _torchOn = false;
+      _flashError = null;
       _controller!.addListener(_cameraChanged);
     } catch (error) {
       if (_current(generation)) {
@@ -160,6 +169,13 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
 
   Future<void> _disposeController(CameraController controller) async {
     try {
+      if (controller.value.flashMode == FlashMode.torch) {
+        try {
+          await controller.setFlashMode(FlashMode.off);
+        } catch (_) {
+          // Disposing the native session remains mandatory if light-off fails.
+        }
+      }
       await controller.dispose();
     } catch (_) {
       _releaseFailed = true;
@@ -188,8 +204,10 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
     controller?.removeListener(_cameraChanged);
     final previousClosing = _closing;
     final capture = _capture;
+    final flash = _flashOperation;
     _closing = () async {
       await previousClosing;
+      if (flash != null) await flash;
       if (capture != null) {
         // takePicture updates its notifier on completion. Wait before disposing
         // that notifier, even when the photo has already been cancelled.
@@ -225,9 +243,52 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
     }
   }
 
+  Future<void> _toggleTorch() async {
+    final controller = _controller;
+    if (_busy ||
+        _flashBusy ||
+        !_flashAvailable ||
+        _finished ||
+        !_active ||
+        controller == null ||
+        !controller.value.isInitialized) {
+      return;
+    }
+    final generation = _generation;
+    final enable = !_torchOn;
+    setState(() {
+      _flashBusy = true;
+      _flashError = null;
+    });
+    final operation = () async {
+      try {
+        await controller.setFlashMode(enable ? FlashMode.torch : FlashMode.off);
+        if (_current(generation)) _torchOn = enable;
+      } catch (_) {
+        if (_current(generation)) {
+          _flashAvailable = false;
+          _flashError =
+              'Подсветка недоступна. Используйте внешний свет или импортируйте фото.';
+        }
+      }
+    }();
+    _flashOperation = operation;
+    try {
+      await operation;
+    } finally {
+      if (identical(_flashOperation, operation)) _flashOperation = null;
+      _flashBusy = false;
+      if (mounted && !_finished) {
+        setState(() {});
+        if (_active && _resumeAllowed && _controller == null) _startCamera();
+      }
+    }
+  }
+
   Future<void> _takePhoto() async {
     final controller = _controller;
     if (_busy ||
+        _flashBusy ||
         _finished ||
         !_active ||
         controller == null ||
@@ -260,7 +321,7 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
   }
 
   Future<void> _importPhoto() async {
-    if (_busy || _finished) return;
+    if (_busy || _flashBusy || _finished) return;
     setState(() => _busy = true);
     try {
       await _releaseCamera();
@@ -358,6 +419,17 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
                   ),
                 ),
               ),
+              if (_flashError != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Text(
+                    _flashError!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.all(16),
                 child: Wrap(
@@ -367,20 +439,45 @@ class _CalibrationCameraPageState extends State<_CalibrationCameraPage>
                   children: [
                     if (_supported)
                       FilledButton.icon(
-                        onPressed: ready && _active && !_busy && !_finished
+                        onPressed:
+                            ready &&
+                                _active &&
+                                !_busy &&
+                                !_flashBusy &&
+                                !_finished
                             ? _takePhoto
                             : null,
                         icon: const Icon(Icons.camera_alt),
                         label: const Text('Снять'),
                       ),
+                    if (_supported)
+                      OutlinedButton.icon(
+                        key: const ValueKey('calibration-torch'),
+                        onPressed:
+                            ready &&
+                                _active &&
+                                !_busy &&
+                                !_flashBusy &&
+                                !_finished &&
+                                _flashAvailable
+                            ? _toggleTorch
+                            : null,
+                        icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
+                        label: Text(
+                          _torchOn ? 'Выключить свет' : 'Включить свет',
+                        ),
+                      ),
                     OutlinedButton.icon(
-                      onPressed: !_busy && !_finished ? _importPhoto : null,
+                      onPressed: !_busy && !_flashBusy && !_finished
+                          ? _importPhoto
+                          : null,
                       icon: const Icon(Icons.photo_library_outlined),
                       label: const Text('Импортировать фото'),
                     ),
                     if (_supported && !ready && !_loading)
                       TextButton(
-                        onPressed: !_busy && _active && !_releaseFailed
+                        onPressed:
+                            !_busy && !_flashBusy && _active && !_releaseFailed
                             ? _startCamera
                             : null,
                         child: const Text('Повторить'),

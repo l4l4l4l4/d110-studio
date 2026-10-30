@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'media_calibration_pattern.dart';
+
 /// Image coordinates use pixel edges: the first pixel's centre is (.5, .5).
 class CalibrationPhotoPoint {
   const CalibrationPhotoPoint(this.x, this.y);
@@ -583,7 +585,8 @@ _Projective _checkedMarks(
   }
   _validateQuad(points);
   final map = _Projective.fit(raster, points);
-  final values = Float64List(81);
+  final side = (calibrationMarkerArm + 1) * 2 + 1;
+  final values = Float64List(side * side);
   for (final p in raster) {
     final centre = map.map(p.x, p.y);
     final right = map.map(p.x + 1, p.y);
@@ -600,43 +603,60 @@ _Projective _checkedMarks(
     if (minimum < 1.6 || maximum / minimum > 3.5 || maximum > 50) {
       _fail('Мало деталей или сильный наклон. Снимите ближе и сверху.');
     }
-    var black = 0.0, white = 0.0;
-    var nBlack = 0, nWhite = 0;
-    var k = 0;
-    for (var dy = -4; dy <= 4; dy++) {
-      for (var dx = -4; dx <= 4; dx++) {
-        final value = map.sample(image, p.x + dx, p.y + dy);
-        values[k++] = value;
-        if ((dx == 0 && dy.abs() <= 3) || (dy == 0 && dx.abs() <= 3)) {
-          black += value;
-          nBlack++;
-        } else {
-          white += value;
-          nWhite++;
-        }
-      }
-    }
-    black /= nBlack;
-    white /= nWhite;
-    if (white - black < 75 || white < image.threshold + 20) {
-      _fail('Кресты неразборчивы. Наведите резкость и свет.');
-    }
-    final middle = (white + black) / 2;
-    var missing = 0, unwanted = 0;
-    k = 0;
-    for (var dy = -4; dy <= 4; dy++) {
-      for (var dx = -4; dx <= 4; dx++) {
-        final value = values[k++];
-        final ink = (dx == 0 && dy.abs() <= 3) || (dy == 0 && dx.abs() <= 3);
-        if (ink && value > middle) missing++;
-        if (!ink && value < middle) unwanted++;
-      }
-    }
-    if (missing > 2 || unwanted > 5) {
-      _fail('Точка не в центре креста. Уточните метки.');
+    if (!_matchesMarker(image, map, p, values) &&
+        // Previously printed references remain usable after session recovery.
+        !_matchesMarker(image, map, p, values, arm: 3, halfStroke: 0)) {
+      _fail('Кресты неразборчивы. Уточните центры, резкость и свет.');
     }
   }
   return map;
+}
+
+bool _matchesMarker(
+  _PhotoPixels image,
+  _Projective map,
+  CalibrationPhotoPoint point,
+  Float64List values, {
+  int arm = calibrationMarkerArm,
+  int halfStroke = calibrationMarkerHalfStroke,
+}) {
+  final radius = arm + 1;
+  var black = 0.0, white = 0.0;
+  var nBlack = 0, nWhite = 0, k = 0;
+  for (var dy = -radius; dy <= radius; dy++) {
+    for (var dx = -radius; dx <= radius; dx++) {
+      final value = map.sample(image, point.x + dx, point.y + dy);
+      values[k++] = value;
+      if (calibrationMarkerInk(dx, dy, arm: arm, halfStroke: halfStroke)) {
+        black += value;
+        nBlack++;
+      } else {
+        white += value;
+        nWhite++;
+      }
+    }
+  }
+  black /= nBlack;
+  white /= nWhite;
+  if (white - black < 75 || white < image.threshold + 20) return false;
+  final middle = (white + black) / 2;
+  var missing = 0, unwanted = 0;
+  k = 0;
+  for (var dy = -radius; dy <= radius; dy++) {
+    for (var dx = -radius; dx <= radius; dx++) {
+      final value = values[k++];
+      final ink = calibrationMarkerInk(
+        dx,
+        dy,
+        arm: arm,
+        halfStroke: halfStroke,
+      );
+      if (ink && value > middle) missing++;
+      if (!ink && value < middle) unwanted++;
+    }
+  }
+  return missing <= math.max(2, nBlack * .08) &&
+      unwanted <= math.max(5, nWhite * .04);
 }
 
 double _rulerScore(_PhotoPixels image, _Projective map, int rows) {

@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:d110_studio/calibration_camera.dart';
+import 'package:d110_studio/media_calibration.dart';
+import 'package:d110_studio/media_geometry.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -43,6 +45,50 @@ void main() {
       }
     }, variant: TargetPlatformVariant({platform}));
   }
+
+  cameraTestWidgets('reference print enters real camera and Back can reprint', (
+    tester,
+  ) async {
+    var prints = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => showMediaCalibration(
+                context,
+                initial: MediaProfile(),
+                canPrint: true,
+                printPattern: (_) async => prints++,
+                saveProfile: (_) async => fail('unverified profile saved'),
+              ),
+              child: const Text('Calibrate'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Calibrate'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('calibration-primary')));
+    await waitForCameraIo(tester, () => camera.ids.length == 1);
+    expect(prints, 1);
+    expect(find.byType(CameraPreview), findsOneWidget);
+    expect(camera.captures, 0);
+    await tester.tap(find.byTooltip('Отмена'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.arrow_back));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('calibration-reprint-reference')),
+    );
+    await waitForCameraIo(tester, () => camera.ids.length == 2);
+    expect(prints, 2);
+    expect(find.byType(CameraPreview), findsOneWidget);
+    expect(camera.captures, 0);
+    await tester.tap(find.byTooltip('Отмена'));
+    await tester.pumpAndSettle();
+  });
 
   cameraTestWidgets(
     'back-camera preview waits for one explicit still-photo shutter',
@@ -116,6 +162,103 @@ void main() {
     },
     platform: TargetPlatform.linux,
   );
+
+  cameraTestWidgets('torch toggles during composition without taking a photo', (
+    tester,
+  ) async {
+    final result = await _openCapture(tester);
+    final light = find.byKey(const ValueKey('calibration-torch'));
+    await tester.tap(light);
+    await tester.pumpAndSettle();
+    expect(camera.flashModes, ['torch']);
+    expect(camera.captures, 0);
+    await tester.tap(light);
+    await tester.pumpAndSettle();
+    expect(camera.flashModes, ['torch', 'off']);
+    await tester.tap(find.byTooltip('Отмена'));
+    await tester.pumpAndSettle();
+    expect(await result.future, isNull);
+  });
+
+  cameraTestWidgets('unsupported light keeps preview and import usable', (
+    tester,
+  ) async {
+    camera.flashError = 'setFlashModeFailed';
+    final result = await _openCapture(
+      tester,
+      pickImage: () async => _photoBytes,
+    );
+    await tester.tap(find.byKey(const ValueKey('calibration-torch')));
+    await tester.pumpAndSettle();
+    expect(find.byType(CameraPreview), findsOneWidget);
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.byKey(const ValueKey('calibration-torch')),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Снять'))
+          .onPressed,
+      isNotNull,
+    );
+    await tester.tap(find.text('Импортировать фото'));
+    await tester.pumpAndSettle();
+    expect(await result.future, orderedEquals(_photoBytes));
+    expect(camera.captures, 0);
+  });
+
+  cameraTestWidgets('background waits for in-flight light before release', (
+    tester,
+  ) async {
+    final result = await _openCapture(tester);
+    camera.flashGate = Completer<void>();
+    await tester.tap(find.byKey(const ValueKey('calibration-torch')));
+    await tester.pump();
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Снять'))
+          .onPressed,
+      isNull,
+    );
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(camera.disposed, isEmpty);
+    expect(camera.created, hasLength(1));
+    camera.flashGate!.complete();
+    await tester.pumpAndSettle();
+    expect(camera.flashModes, ['torch', 'off']);
+    expect(camera.disposed, contains(camera.ids.first));
+    expect(camera.created, hasLength(2));
+    expect(find.byType(CameraPreview), findsOneWidget);
+    await tester.tap(find.byTooltip('Отмена'));
+    await tester.pumpAndSettle();
+    expect(await result.future, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  cameraTestWidgets('cancel during light change never reopens the camera', (
+    tester,
+  ) async {
+    final result = await _openCapture(tester);
+    camera.flashGate = Completer<void>();
+    await tester.tap(find.byKey(const ValueKey('calibration-torch')));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Отмена'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(await result.future, isNull);
+    expect(camera.disposed, isEmpty);
+    camera.flashGate!.complete();
+    await tester.pumpAndSettle();
+    expect(camera.flashModes, ['torch', 'off']);
+    expect(camera.disposed, contains(camera.ids.single));
+    expect(camera.created, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
 
   cameraTestWidgets('cancel disposes a late initialization without reopening', (
     tester,
@@ -501,6 +644,9 @@ class _CameraHost {
   Completer<void>? createGate;
   Completer<void>? initializeGate;
   Completer<void>? disposeGate;
+  Completer<void>? flashGate;
+  String? flashError;
+  final flashModes = <String>[];
   String? accessError;
   bool noCamera = false;
 
@@ -550,6 +696,13 @@ class _CameraHost {
                 );
               }
               return picture.future;
+            case 'setFlashMode':
+              flashModes.add((arguments as Map)['mode'] as String);
+              await flashGate?.future;
+              if (flashError case final code?) {
+                throw PlatformException(code: code);
+              }
+              return null;
             case 'dispose':
               await disposeGate?.future;
               disposed.add((arguments as Map)['cameraId'] as int);
@@ -591,6 +744,7 @@ class _CameraHost {
       gate.complete('/cancelled-and-never-read.png');
     }
     if (disposeGate case final gate? when !gate.isCompleted) gate.complete();
+    if (flashGate case final gate? when !gate.isCompleted) gate.complete();
   }
 
   void uninstall() {

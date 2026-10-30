@@ -55,6 +55,44 @@ Future<Uint8List> renderReferencePhotograph() async {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
+    'packed fiducials have thick arms, open corners and exact centroids',
+    () async {
+      final reference = await renderMediaCalibrationPattern(
+        MediaProfile(lengthMm: 10),
+      );
+      bool inkAt(int feed, int head) =>
+          (reference.packed[feed * 12 + (95 - head) ~/ 8] &
+              (0x80 >> ((95 - head) % 8))) !=
+          0;
+      for (final x in [16, 63]) {
+        for (final y in [16, 56]) {
+          var count = 0, sumX = 0.0, sumY = 0.0;
+          for (var dy = -7; dy <= 7; dy++) {
+            for (var dx = -7; dx <= 7; dx++) {
+              final expected =
+                  (dx.abs() <= 6 && dy.abs() <= 1) ||
+                  (dy.abs() <= 6 && dx.abs() <= 1);
+              expect(
+                inkAt(x + dx, y + dy),
+                expected,
+                reason: 'Marker ($x,$y) at ($dx,$dy)',
+              );
+              if (inkAt(x + dx, y + dy)) {
+                count++;
+                sumX += x + dx + .5;
+                sumY += y + dy + .5;
+              }
+            }
+          }
+          expect(count, 69);
+          expect(sumX / count, x + .5);
+          expect(sumY / count, y + .5);
+        }
+      }
+    },
+  );
+
+  test(
     'actual packed short reference and bundled font retain measurable fiducials and ruler phase',
     () async {
       final encoded = await renderReferencePhotograph();

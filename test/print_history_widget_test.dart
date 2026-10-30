@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:d110_studio/label.dart';
 import 'package:d110_studio/main.dart';
+import 'package:d110_studio/print_quantity.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -95,6 +96,17 @@ void main() {
         final job = outcome == 'diagnostic'
             ? page.printer.printRaster(Uint8List(12), 1) as Future<void>
             : page.print() as Future<void>;
+        if (outcome != 'diagnostic') {
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.tap(
+            find.descendant(
+              of: find.byType(PrintQuantityDialog),
+              matching: find.text('Печатать'),
+            ),
+          );
+          await tester.pump();
+        }
         await completionRequested.future.timeout(const Duration(seconds: 10));
         expect(history, originalHistory);
         page.document.name = 'Edited while ACK pending';
