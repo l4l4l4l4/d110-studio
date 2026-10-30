@@ -372,6 +372,29 @@ class PrinterClient extends ChangeNotifier {
     }
   });
 
+  /// Hardware-verified on the AiYin D110 V1.0.4: [status, percent].
+  Future<int> readBatteryPercent() => _singleFlight(() async {
+    _requireConnection();
+    try {
+      final response = await _exchange([
+        0x10,
+        0xFF,
+        0x50,
+        0xF1,
+      ], expectedLength: 2);
+      if (response[0] == 0xFF || response[1] > 100) {
+        throw const PrinterException(
+          'Invalid battery response; reconnect before continuing',
+          code: 'protocol_error',
+        );
+      }
+      return response[1];
+    } catch (_) {
+      await _closeAfterFailure();
+      rethrow;
+    }
+  });
+
   Future<Uint8List> _exchange(
     List<int> bytes, {
     int expectedLength = 0,

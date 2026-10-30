@@ -11,6 +11,8 @@ import 'fonts.dart';
 import 'image_picker.dart';
 import 'sticker_stack.dart';
 import 'printer_connection.dart';
+import 'printer_battery.dart';
+import 'battery_view.dart';
 import 'drawing.dart';
 import 'shortener.dart';
 import 'qr_calibration.dart';
@@ -137,6 +139,7 @@ class _StudioPageState extends State<StudioPage>
   set selected(LabelElement? value) => activeTab.selected = value;
   List<Map<String, dynamic>> templates = [];
   late final connection = PrinterConnectionController(printer);
+  late final battery = PrinterBatteryController(connection);
   String? error;
   bool busy = true;
   bool get preview => activeTab.preview;
@@ -191,6 +194,9 @@ class _StudioPageState extends State<StudioPage>
       connection.setForeground(
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
       );
+      battery.setForeground(
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+      );
       unawaited(connection.restore());
     }
   }
@@ -203,6 +209,7 @@ class _StudioPageState extends State<StudioPage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (native) {
       connection.setForeground(state == AppLifecycleState.resumed);
+      battery.setForeground(state == AppLifecycleState.resumed);
     }
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
@@ -452,6 +459,7 @@ class _StudioPageState extends State<StudioPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    battery.dispose();
     connection.dispose();
     ants.dispose();
     _workspaceTimer?.cancel();
@@ -1633,7 +1641,40 @@ class _StudioPageState extends State<StudioPage>
     final editable = !busy && !preview && element != null;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('D110 Studio', style: TextStyle(fontSize: 20)),
+        leading: AnimatedBuilder(
+          animation: battery,
+          builder: (context, _) {
+            final percent = battery.percent;
+            final icon = switch (percent) {
+              null => Icons.battery_unknown,
+              0 => Icons.battery_0_bar,
+              <= 15 => Icons.battery_1_bar,
+              <= 30 => Icons.battery_2_bar,
+              <= 45 => Icons.battery_3_bar,
+              <= 60 => Icons.battery_4_bar,
+              <= 75 => Icons.battery_5_bar,
+              < 100 => Icons.battery_6_bar,
+              _ => Icons.battery_full,
+            };
+            return Semantics(
+              label: percent == null
+                  ? 'Заряд принтера неизвестен'
+                  : 'Заряд принтера: $percent%',
+              child: IconButton(
+                tooltip: 'Батарея принтера',
+                onPressed: () => showPrinterBattery(context, battery),
+                icon: Icon(
+                  icon,
+                  color: percent == null
+                      ? StudioColors.muted
+                      : percent <= 15
+                      ? StudioColors.red
+                      : StudioColors.green,
+                ),
+              ),
+            );
+          },
+        ),
         actions: [
           IconButton(
             tooltip: native

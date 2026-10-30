@@ -74,7 +74,10 @@ void main() {
             await disconnectGate?.future;
             return null;
           case 'exchange':
-            return Uint8List.fromList('D110'.codeUnits);
+            final bytes = (call.arguments as Map)['bytes'] as Uint8List;
+            return Uint8List.fromList(
+              bytes[2] == 0x50 ? [0, 78] : 'D110'.codeUnits,
+            );
           default:
             return null;
         }
@@ -163,7 +166,10 @@ void main() {
             {'name': 'D110', 'address': address, 'classic': true, 'spp': true},
           ];
         case 'exchange':
-          return Uint8List.fromList('D110'.codeUnits);
+          final bytes = (call.arguments as Map)['bytes'] as Uint8List;
+          return Uint8List.fromList(
+            bytes[2] == 0x50 ? [0, 78] : 'D110'.codeUnits,
+          );
         case 'saveLastPrinterAddress':
           saved = (call.arguments as Map)['address'] as String;
           return null;
@@ -229,7 +235,10 @@ void main() {
           if (address == oldAddress) throw PlatformException(code: 'timeout');
           return null;
         case 'exchange':
-          return Uint8List.fromList('D110'.codeUnits);
+          final bytes = (call.arguments as Map)['bytes'] as Uint8List;
+          return Uint8List.fromList(
+            bytes[2] == 0x50 ? [0, 78] : 'D110'.codeUnits,
+          );
         case 'saveLastPrinterAddress':
           saved = (call.arguments as Map)['address'] as String;
           return null;

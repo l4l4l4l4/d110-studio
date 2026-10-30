@@ -95,6 +95,18 @@ handshake; a previously verified classic address may survive renaming or stale
 service metadata. Missing cached UUIDs are not proof of incompatibility.
 This printer uses classic RFCOMM/SPP, not a BLE GATT print service.
 
+The top-left battery icon replaces the editor title and shows the printer's
+reported charge without a numeric label. Tap it for the current percentage,
+last measurement time and a graph of real samples. The AiYin query
+`10 FF 50 F1` returns `[status, percent]`, verified on the D110 V1.0.4;
+invalid/missing readings are unknown, never an assumed full battery.
+Monitoring waits for the entire connection handshake and all printer
+transactions, refreshes every 30 seconds while foregrounded and requests a fresh
+reading when opened. It never sends print/configuration commands. The graph
+keeps up to 24 hours / 2,880 samples in memory for this app session; reconnecting
+the same printer preserves its history, selecting another printer starts a new
+history, and unmeasured gaps are not joined into an invented discharge curve.
+
 `Рисунок` opens a finger/mouse canvas at the full design's physical dot size,
 with a 1–32-dot black brush, undo and recoverable clear. Save adds movable,
 resizable ink without erasing underlying objects; cancel leaves the design
