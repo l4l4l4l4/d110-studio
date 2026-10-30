@@ -35,6 +35,12 @@ and source/print preview states. The active tab and its close button scroll
 into view; closing a changed draft requires confirmation. Creating or switching
 tabs does not send anything to the printer.
 
+The canvas stays horizontal by default. `Этикетка` → `Ориентация холста`
+explicitly selects horizontal or vertical view for all design tabs and persists
+across restarts. Opening text controls, the keyboard or another viewport size
+never changes that choice. Switching orientation recentres the tab views; it
+does not rotate the artwork, alter physical dimensions or change printed dots.
+
 Drafts persist locally and survive reopening. Startup selects the exact last
 acknowledged print while retaining newer edits in their own tabs. A damaged
 print-history record warns without discarding or blocking valid drafts;

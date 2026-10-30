@@ -35,6 +35,73 @@ void main() {
   );
 
   testWidgets(
+    'orientation preference survives editing, keyboard and relaunch',
+    (tester) async {
+      tester.view.physicalSize = const Size(420, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+      final paint = find.byWidgetPredicate(
+        (widget) => widget is CustomPaint && widget.painter is LabelPainter,
+      );
+      void expectDirection(bool vertical) {
+        final box = tester.renderObject<RenderBox>(paint);
+        final direction =
+            box.localToGlobal(const Offset(1, 0)) -
+            box.localToGlobal(Offset.zero);
+        expect(vertical ? direction.dx : direction.dy, closeTo(0, .001));
+        expect(vertical ? direction.dy : direction.dx, greaterThan(0));
+      }
+
+      Future<void> orientation(String label) async {
+        final dynamic page = tester.state(find.byType(StudioPage));
+        page.labelSettings();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.tap(find.text(label));
+        await tester.pump();
+        Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+        await tester.pump(const Duration(milliseconds: 350));
+      }
+
+      Future<void> relaunch() async {
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump();
+        await tester.pumpWidget(const StudioApp());
+        await tester.pump();
+      }
+
+      await tester.pumpWidget(const StudioApp());
+      await tester.pump();
+      expectDirection(false);
+      final dynamic page = tester.state(find.byType(StudioPage));
+      final design = jsonEncode((page.document as LabelDocument).toJson());
+      await orientation('Вертикально');
+      expectDirection(true);
+      expect(jsonEncode((page.document as LabelDocument).toJson()), design);
+      await relaunch();
+      expectDirection(true);
+      final dynamic reopened = tester.state(find.byType(StudioPage));
+      reopened.editSelected();
+      await tester.pump();
+      expectDirection(true);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump();
+      expectDirection(true);
+      tester.view.resetViewInsets();
+      await tester.pump();
+      await tester.tap(find.byTooltip('Закрыть настройки'));
+      await tester.pump();
+      expectDirection(true);
+      await orientation('Горизонтально');
+      await relaunch();
+      expectDirection(false);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
     'new named tab switches without inspector or document state bleed',
     (tester) async {
       await tester.pumpWidget(const StudioApp());

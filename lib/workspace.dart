@@ -115,6 +115,7 @@ class DesignWorkspace {
   final List<DesignTab> tabs;
   final String? printedRestoreError;
   late String activeId;
+  bool verticalCanvas = false;
   DesignTab get active => tabs.firstWhere((tab) => tab.id == activeId);
 
   void activate(String id) {
@@ -149,6 +150,7 @@ class DesignWorkspace {
   Map<String, dynamic> toJson() => {
     'version': 1,
     'activeId': activeId,
+    'verticalCanvas': verticalCanvas,
     'tabs': tabs.map((tab) => tab.toJson()).toList(),
   };
 
@@ -160,15 +162,19 @@ class DesignWorkspace {
     try {
       String? active;
       String? printedError;
+      var verticalCanvas = false;
       if (text != null) {
         final json = jsonDecode(text);
         if (json is! Map ||
             json['version'] != 1 ||
             json['tabs'] is! List ||
             (json['tabs'] as List).isEmpty ||
-            json['activeId'] is! String) {
+            json['activeId'] is! String ||
+            (json.containsKey('verticalCanvas') &&
+                json['verticalCanvas'] is! bool)) {
           throw const FormatException('Некорректное рабочее пространство');
         }
+        verticalCanvas = json['verticalCanvas'] as bool? ?? false;
         for (final entry in json['tabs'] as List) {
           if (entry is! Map) {
             throw const FormatException('Некорректная вкладка');
@@ -213,7 +219,8 @@ class DesignWorkspace {
         }
       }
       if (tabs.isEmpty) tabs.add(DesignTab(LabelDocument(name: 'Новый макет')));
-      return DesignWorkspace._(tabs, active ?? tabs.first.id, printedError);
+      return DesignWorkspace._(tabs, active ?? tabs.first.id, printedError)
+        ..verticalCanvas = verticalCanvas;
     } catch (_) {
       for (final tab in tabs) {
         tab.dispose();

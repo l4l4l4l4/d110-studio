@@ -1016,6 +1016,30 @@ class _StudioPageState extends State<StudioPage>
           builder: (context, update) => Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              const Text('Ориентация холста'),
+              const SizedBox(height: 8),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('Горизонтально')),
+                  ButtonSegment(value: true, label: Text('Вертикально')),
+                ],
+                selected: {workspace.verticalCanvas},
+                onSelectionChanged: busy
+                    ? null
+                    : (value) {
+                        setState(() {
+                          workspace.verticalCanvas = value.single;
+                          for (final tab in workspace.tabs) {
+                            tab.viewZoom = 1;
+                            tab.viewPan = Offset.zero;
+                          }
+                          _resetGesture();
+                        });
+                        _saveWorkspaceSoon();
+                        update(() {});
+                      },
+              ),
+              const SizedBox(height: 16),
               Text(
                 'Одна наклейка: ${document.lengthMm} × ${document.media.widthMm} мм, '
                 'радиус ${document.media.radiusMm} мм.\n'
@@ -1262,9 +1286,7 @@ class _StudioPageState extends State<StudioPage>
 
   Widget canvas() => LayoutBuilder(
     builder: (context, constraints) {
-      final portrait =
-          constraints.maxWidth < 600 &&
-          constraints.maxHeight > constraints.maxWidth * .9;
+      final vertical = workspace.verticalCanvas;
       final side = math.max(
         document.width.toDouble(),
         document.canvasHeight.toDouble(),
@@ -1278,10 +1300,10 @@ class _StudioPageState extends State<StudioPage>
       final scale = fit * viewZoom;
       // The gesture surface is the entire viewport, not the paper-sized square.
       // A resized/rotated object's knobs can lie outside the physical label.
-      final viewportWidth = portrait
+      final viewportWidth = vertical
           ? constraints.maxHeight
           : constraints.maxWidth;
-      final viewportHeight = portrait
+      final viewportHeight = vertical
           ? constraints.maxWidth
           : constraints.maxHeight;
       final inset = Offset(
@@ -1289,7 +1311,7 @@ class _StudioPageState extends State<StudioPage>
         (viewportHeight - document.canvasHeight * scale) / 2,
       );
       Offset labelPoint(Offset local) => (local - inset) / scale;
-      final pan = portrait ? Offset(viewPan.dy, -viewPan.dx) : viewPan;
+      final pan = vertical ? Offset(viewPan.dy, -viewPan.dx) : viewPan;
       final margin = math.min(
         16.0,
         math.min(viewportWidth, viewportHeight) / 2,
@@ -1305,7 +1327,7 @@ class _StudioPageState extends State<StudioPage>
           child: Transform.translate(
             offset: viewPan,
             child: RotatedBox(
-              quarterTurns: portrait ? 1 : 0,
+              quarterTurns: vertical ? 1 : 0,
               child: SizedBox(
                 width: viewportWidth,
                 height: viewportHeight,

@@ -13,6 +13,14 @@ Finder labelPaint() => find.byWidgetPredicate(
 );
 Finder gestureSurface() => find.byKey(const ValueKey('label-gesture'));
 
+void expectCanvasDirection(WidgetTester tester, {bool vertical = false}) {
+  final box = tester.renderObject<RenderBox>(labelPaint());
+  final direction =
+      box.localToGlobal(const Offset(1, 0)) - box.localToGlobal(Offset.zero);
+  expect(vertical ? direction.dx : direction.dy, closeTo(0, .001));
+  expect(vertical ? direction.dy : direction.dx, greaterThan(0));
+}
+
 Future<LabelPainter> openEditor(WidgetTester tester, Size viewport) async {
   tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   tester.view.devicePixelRatio = 1;
@@ -36,7 +44,7 @@ Future<LabelPainter> openEditor(WidgetTester tester, Size viewport) async {
 }
 
 /// Screen point of a label-space corner, taken from the rendered surface so
-/// portrait rotation and centering cannot drift from the widget.
+/// the selected canvas orientation and centering cannot drift from the widget.
 Offset rendered(RenderBox box, LabelPainter painter, Offset labelPoint) {
   final paint = find.byWidgetPredicate(
     (widget) =>
@@ -648,8 +656,10 @@ void main() {
       tester,
     ) async {
       final painter = await openEditor(tester, viewport);
+      expectCanvasDirection(tester);
       await tester.tap(find.text('Правка'));
       await tester.pump();
+      expectCanvasDirection(tester);
       expect(find.byType(BottomSheet), findsNothing);
       expect(find.byKey(const ValueKey('live-inspector')), findsOneWidget);
       expect(tester.getSize(gestureSurface()).shortestSide, greaterThan(100));
@@ -660,10 +670,12 @@ void main() {
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         addTearDown(tester.view.resetViewInsets);
         await tester.pump();
+        expectCanvasDirection(tester);
         expect(tester.getSize(gestureSurface()).shortestSide, greaterThan(60));
         expect(tester.takeException(), isNull);
         tester.view.resetViewInsets();
         await tester.pump();
+        expectCanvasDirection(tester);
       }
       final dynamic page = tester.state(find.byType(StudioPage));
       final second = LabelElement(kind: ElementKind.text, text: 'Second');
@@ -678,6 +690,7 @@ void main() {
       page.deleteSelected();
       await tester.pump();
       expect(find.byKey(const ValueKey('live-inspector')), findsNothing);
+      expectCanvasDirection(tester);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
