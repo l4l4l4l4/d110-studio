@@ -16,3 +16,4 @@ android/key.properties
 *.iml
 .DS_Store
 .android-sdk
+.signing/

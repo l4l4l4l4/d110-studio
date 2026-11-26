@@ -1,7 +1,7 @@
 name: d110_studio
 description: Local-first label editor for the AiYin-protocol D110.
 publish_to: none
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: '>=3.11.0 <4.0.0'

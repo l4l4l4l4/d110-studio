@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version="${VERSION:-1.0.0}"
+version="${VERSION:-1.1.0}"
 work="build/appimage"
 mkdir -p "$work/tools" "$work/AppDir/usr/bin" dist
 # Keep the Flutter executable beside its lib/ and data/ directories.

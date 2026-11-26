@@ -1231,7 +1231,7 @@ class _StudioPageState extends State<StudioPage>
                 onPressed: () => showLicensePage(
                   context: context,
                   applicationName: 'D110 Studio',
-                  applicationVersion: '1.0.0',
+                  applicationVersion: '1.1.0',
                 ),
                 icon: const Icon(Icons.info_outline),
                 label: const Text('Лицензии приложения и шрифтов'),

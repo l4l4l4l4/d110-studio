@@ -32,12 +32,15 @@ jobs:
           flutter-version: '3.41.9'
           cache: true
       - run: flutter pub get && flutter build linux --release
-      - run: bash packaging/appimage.sh
+      - name: Package AppImage
+        run: |
+          version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
+          VERSION="$version" bash packaging/appimage.sh
       - name: Smoke extracted AppImage
         run: |
           cd dist
           chmod +x *.AppImage
-          ./D110-Studio-1.0.0-linux-x86_64.AppImage --appimage-extract
+          ./D110-Studio-*-linux-x86_64.AppImage --appimage-extract
           xvfb-run -a timeout 8 squashfs-root/AppRun > smoke.log 2>&1 &
           pid=$!
           set +e
@@ -88,7 +91,10 @@ jobs:
         run: flutter pub get && flutter build apk --debug
       - name: Prepare signed APK artifact
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        run: mkdir -p dist && cp build/app/outputs/flutter-apk/app-release.apk dist/D110-Studio-1.0.0-android.apk
+        run: |
+          version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/D110-Studio-${version}-android.apk"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         with:
@@ -151,4 +157,4 @@ jobs:
           sha256sum *.AppImage *.apk *.exe > SHA256SUMS
           gh release create "$GITHUB_REF_NAME" *.AppImage *.apk *.exe SHA256SUMS \
             --title "D110 Studio $GITHUB_REF_NAME" \
-            --notes 'Flutter label editor: text, QR, images, positioning/rotation, monochrome preview, threshold, Bayer, Floyd–Steinberg and Sobel. Classic Bluetooth for the verified AiYin-protocol ORICO D110 revision. Includes Linux x86_64 AppImage, persistently signed Android APK and Windows x64 EXE installer. NIIMBOT-protocol D110 revisions are not compatible. Windows installer is unsigned. No firmware modifications.'
+            --generate-notes
